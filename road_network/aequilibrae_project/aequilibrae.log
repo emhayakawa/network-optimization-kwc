@@ -1,0 +1,14 @@
+2026-03-10 11:53:52,642;WARNING ; About table already exists. Nothing was done
+2026-03-10 11:55:54,323;INFO ; Updating layer statistics for links, this may take a moment
+2026-03-10 11:55:54,335;INFO ; Updated layer statistics for links
+2026-03-10 11:55:54,411;INFO ; Updating layer statistics for nodes, this may take a moment
+2026-03-10 11:55:54,422;INFO ; Updated layer statistics for nodes
+2026-03-10 11:55:57,923;INFO ; Network built successfully
+2026-03-10 11:55:58,056;WARNING ; No centroids in the model. Nothing to block
+2026-03-10 11:55:58,056;WARNING ; Your graph has no centroids
+2026-03-10 11:55:58,067;WARNING ; No centroids in the model. Nothing to block
+2026-03-10 11:55:58,067;WARNING ; Your graph has no centroids
+2026-03-10 11:55:58,082;WARNING ; No centroids in the model. Nothing to block
+2026-03-10 11:55:58,082;WARNING ; Your graph has no centroids
+2026-03-10 11:55:58,092;WARNING ; No centroids in the model. Nothing to block
+2026-03-10 11:55:58,092;WARNING ; Your graph has no centroids

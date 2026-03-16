@@ -1,0 +1,2 @@
+feed_publisher_name,feed_publisher_url,feed_lang,feed_start_date,feed_end_date,feed_version
+Publisher Name,http://www.publisherUrl.com,en,20260105,20260704,Release 36_20260128-115154
