@@ -13,16 +13,17 @@ import os
 # Data Paths
 # =============================================================================
 _URA_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DATA_DIR = os.path.join(_URA_DIR, "Data")
 
 # LRT GTFS data (ION Light Rail - current operating: Conestoga to Fairway)
-LRT_GTFS_DIR = os.path.join(_URA_DIR, "GTFS(onlyLRT)")
+LRT_GTFS_DIR = os.path.join(_DATA_DIR, "GTFS(onlyLRT)")
 
 # Bus GTFS data (GRT bus routes - full transit system)
-BUS_GTFS_DIR = os.path.join(_URA_DIR, "Raw_GTFS")
+BUS_GTFS_DIR = os.path.join(_DATA_DIR, "Raw_GTFS")
 
 # ION data files (stops and route geometry)
-ION_STOPS_CSV = os.path.join(_URA_DIR, "ION_Stops.csv")
-ION_ROUTES_CSV = os.path.join(_URA_DIR, "ION_Routes.csv")
+ION_STOPS_CSV = os.path.join(_DATA_DIR, "ION_Stops.csv")
+ION_ROUTES_CSV = os.path.join(_DATA_DIR, "ION_Routes.csv")
 
 # =============================================================================
 # Network Parameters

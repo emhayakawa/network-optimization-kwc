@@ -13,6 +13,11 @@ The network supports:
 - Export to ArcGIS/QGIS (GeoPackage format)
 - AequilibraE project creation for traffic assignment (merge with road network)
 """
+import os
+import sys
+_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _root not in sys.path:
+    sys.path.insert(0, _root)
 
 from .build_ion_network import (
     load_bus_gtfs,
@@ -29,8 +34,8 @@ from .build_ion_network import (
     build_network,
 )
 from .aequilibrae_network import create_aequilibrae_project
-from .shortest_path_ion import (
-    shortest_path_ion,
+from transit.shortest_path import (
+    shortest_path_transit,
     compute_generalized_cost,
     compute_path_details,
     node_ids_at_stop,
@@ -41,6 +46,8 @@ from .shortest_path_ion import (
     COST_DISTANCE,
     COST_GENERALIZED,
 )
+# Backward compatibility alias
+shortest_path_ion = shortest_path_transit
 from .preprocess_lrt import preprocess_lrt_stops, merge_lrt_stops_with_gtfs
 
 __all__ = [
@@ -60,6 +67,7 @@ __all__ = [
     "build_network",
     "create_aequilibrae_project",
     # Shortest path
+    "shortest_path_transit",
     "shortest_path_ion",
     "compute_generalized_cost",
     "compute_path_details",

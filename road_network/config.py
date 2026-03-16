@@ -8,9 +8,10 @@ import os
 # File Paths (relative to URA folder)
 # ============================================================================
 _URA_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DATA_DIR = os.path.join(_URA_DIR, "Data")
 
-ROADS_SHAPEFILE = os.path.join(_URA_DIR, "Roads/Roads.shp")
-TRAFFIC_LIGHTS_SHAPEFILE = os.path.join(_URA_DIR, "Traffic_Lights_-7232028556142916675/Traffic_Lights.shp")
+ROADS_SHAPEFILE = os.path.join(_DATA_DIR, "Roads/Roads.shp")
+TRAFFIC_LIGHTS_SHAPEFILE = os.path.join(_DATA_DIR, "Traffic_Lights_-7232028556142916675/Traffic_Lights.shp")
 
 # Output directories
 GMNS_DIR = os.path.join(_URA_DIR, "road_network/data/gmns")

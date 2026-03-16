@@ -10,34 +10,42 @@ Build a bus-only network from GTFS where:
 """
 import os
 import sys
-import zipfile
 import pandas as pd
 import numpy as np
 
+# Ensure URA root is in path for transit module (when imported as package)
+_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _root not in sys.path:
+    sys.path.insert(0, _root)
+
 # Handle both module import and direct execution
 if __name__ == "__main__":
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    _dir = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, os.path.dirname(_dir))
+    sys.path.insert(0, _dir)
     from config import (
         TRANSFER_TIME_MINUTES,
-        DEFAULT_GTFS_ZIP,
+        DEFAULT_GTFS_PATH,
         WALKING_LINK_MAX_M,
         WALKING_SPEED_M_PER_MIN,
         STOP_CLUSTER_RADIUS_M,
         FARE_CONSTANT,
         VALUE_OF_TIME,
+        WAITING_TIME_MINUTES,
     )
-    from shortest_path_bus import shortest_path_bus
+    from transit.shortest_path import shortest_path_transit, compute_path_details, export_shortest_path_to_arcgis
 else:
     from .config import (
         TRANSFER_TIME_MINUTES,
-        DEFAULT_GTFS_ZIP,
+        DEFAULT_GTFS_PATH,
         WALKING_LINK_MAX_M,
         WALKING_SPEED_M_PER_MIN,
         STOP_CLUSTER_RADIUS_M,
         FARE_CONSTANT,
         VALUE_OF_TIME,
+        WAITING_TIME_MINUTES,
     )
-    from .shortest_path_bus import shortest_path_bus
+    from transit.shortest_path import shortest_path_transit, compute_path_details, export_shortest_path_to_arcgis
 
 
 def _parse_time(s):
@@ -62,17 +70,15 @@ def _haversine_m(lat1, lon1, lat2, lon2):
     return R * c
 
 
-def load_gtfs(gtfs_zip_path=None):
-    """Load routes, stops, stop_times, trips from GTFS zip. Returns dict of DataFrames."""
-    path = gtfs_zip_path or DEFAULT_GTFS_ZIP
+def load_gtfs(gtfs_path=None):
+    """Load routes, stops, stop_times, trips from GTFS directory (Raw_GTFS). Returns dict of DataFrames."""
+    path = gtfs_path or DEFAULT_GTFS_PATH
     data = {}
-    with zipfile.ZipFile(path, "r") as z:
-        for name in ["routes", "stops", "stop_times", "trips"]:
-            fname = name + ".txt"
-            if fname not in z.namelist():
-                raise FileNotFoundError(f"{fname} not in GTFS zip")
-            with z.open(fname) as f:
-                data[name] = pd.read_csv(f)
+    for name in ["routes", "stops", "stop_times", "trips"]:
+        fname = os.path.join(path, name + ".txt")
+        if not os.path.exists(fname):
+            raise FileNotFoundError(f"GTFS file not found: {fname}")
+        data[name] = pd.read_csv(fname)
     return data
 
 
@@ -143,7 +149,7 @@ def cluster_nearby_stops(stops_df, cluster_radius_m=None):
     return stops
 
 
-def build_nodes_and_links(gtfs_zip_path=None):
+def build_nodes_and_links(gtfs_path=None):
     """
     Build bus network nodes and links from GTFS.
 
@@ -160,7 +166,7 @@ def build_nodes_and_links(gtfs_zip_path=None):
       links_df: columns [link_id, from_node_id, to_node_id, link_type, travel_time_min, length_m]
     """
     transfer_minutes = TRANSFER_TIME_MINUTES
-    data = load_gtfs(gtfs_zip_path)
+    data = load_gtfs(gtfs_path)
     stops = data["stops"]
     stop_times = data["stop_times"]
     trips = data["trips"]
@@ -388,25 +394,21 @@ def save_network(nodes_df, links_df, out_dir, verbose=True):
         print(f"  Links saved to: {links_path}")
 
 
-def load_gtfs_shapes(gtfs_zip_path=None):
+def load_gtfs_shapes(gtfs_path=None):
     """
-    Load shapes.txt from GTFS zip file.
+    Load shapes.txt from GTFS directory (Raw_GTFS).
     
     Returns:
         dict: shape_id -> list of (lon, lat) coordinates in sequence order
     """
-    path = gtfs_zip_path or DEFAULT_GTFS_ZIP
-    shape_coords = {}
-    
-    with zipfile.ZipFile(path, "r") as z:
-        if "shapes.txt" not in z.namelist():
-            return {}
-        
-        with z.open("shapes.txt") as f:
-            shapes_df = pd.read_csv(f)
-    
+    path = gtfs_path or DEFAULT_GTFS_PATH
+    shapes_file = os.path.join(path, "shapes.txt")
+    if not os.path.exists(shapes_file):
+        return {}
+    shapes_df = pd.read_csv(shapes_file)
     shapes_df = shapes_df.sort_values(["shape_id", "shape_pt_sequence"])
     
+    shape_coords = {}
     for shape_id, grp in shapes_df.groupby("shape_id"):
         coords = list(zip(grp["shape_pt_lon"].values, grp["shape_pt_lat"].values))
         shape_coords[str(shape_id)] = coords
@@ -428,30 +430,29 @@ def _find_closest_point_idx(coords, target):
     return min_idx
 
 
-def build_link_shape_lookup(gtfs_zip_path, nodes_df, links_df):
+def build_link_shape_lookup(gtfs_path, nodes_df, links_df):
     """
     Build a lookup from (from_node_id, to_node_id) to shape geometry.
     
     For each route link, finds the segment of the shape between the two stops.
     
     Parameters:
-        gtfs_zip_path: Path to GTFS zip file
+        gtfs_path: Path to GTFS directory (Raw_GTFS)
         nodes_df: Network nodes
         links_df: Network links
     
     Returns:
         dict: (from_node_id, to_node_id) -> list of (lon, lat) coordinates
     """
-    shape_coords = load_gtfs_shapes(gtfs_zip_path)
+    shape_coords = load_gtfs_shapes(gtfs_path)
     if not shape_coords:
         return {}
     
-    path = gtfs_zip_path or DEFAULT_GTFS_ZIP
-    with zipfile.ZipFile(path, "r") as z:
-        if "trips.txt" not in z.namelist():
-            return {}
-        with z.open("trips.txt") as f:
-            trips_df = pd.read_csv(f)
+    path = gtfs_path or DEFAULT_GTFS_PATH
+    trips_file = os.path.join(path, "trips.txt")
+    if not os.path.exists(trips_file):
+        return {}
+    trips_df = pd.read_csv(trips_file)
     
     trips_df["route_id"] = trips_df["route_id"].astype(str)
     trips_df["shape_id"] = trips_df["shape_id"].astype(str)
@@ -672,144 +673,8 @@ def export_to_gmns(nodes_df, links_df, out_dir, srid=26917):
     return node_file, link_file, geometry_file
 
 
-def compute_path_details(links_df, path_links):
-    """
-    Compute detailed statistics for a path.
-    
-    Parameters:
-        links_df: DataFrame of all links
-        path_links: list of (from_node_id, to_node_id) tuples
-    
-    Returns:
-        dict with total_length_m, total_travel_time_min, num_transfers, routes_used
-    """
-    if not path_links:
-        return {
-            "total_length_m": 0,
-            "total_travel_time_min": 0,
-            "num_transfers": 0,
-            "routes_used": [],
-        }
-    
-    link_lookup = links_df.set_index(["from_node_id", "to_node_id"])
-    total_length_m = 0.0
-    total_travel_time_min = 0.0
-    num_transfers = 0
-    routes_used = []
-    
-    for (f, t) in path_links:
-        try:
-            rows = link_lookup.loc[(f, t)]
-            row = rows.iloc[0] if isinstance(rows, pd.DataFrame) else rows
-            total_length_m += float(row["length_m"])
-            total_travel_time_min += float(row["travel_time_min"])
-            
-            link_type = row.get("link_type", "")
-            if link_type == "transfer":
-                num_transfers += 1
-            elif link_type == "route":
-                route_id = row.get("route_id")
-                if route_id and (not routes_used or routes_used[-1] != route_id):
-                    routes_used.append(route_id)
-        except KeyError:
-            continue
-    
-    return {
-        "total_length_m": total_length_m,
-        "total_travel_time_min": total_travel_time_min,
-        "num_transfers": num_transfers,
-        "routes_used": routes_used,
-    }
-
-
-def export_shortest_path_to_arcgis(nodes_df, links_df, path_nodes, path_links, out_dir=None, link_shapes=None):
-    """
-    Export the shortest path to a GeoPackage for ArcGIS visualization.
-    
-    Parameters:
-        nodes_df: DataFrame of all nodes
-        links_df: DataFrame of all links  
-        path_nodes: list of node IDs in the path
-        path_links: list of (from_node_id, to_node_id) tuples
-        out_dir: output directory (default: arcgis_export in same folder)
-        link_shapes: dict of (from_node_id, to_node_id) -> list of (lon, lat) coords
-                     from GTFS shapes.txt for proper route geometry
-    """
-    import geopandas as gpd
-    from shapely.geometry import LineString, Point
-    
-    if out_dir is None:
-        out_dir = os.path.join(os.path.dirname(__file__), "arcgis_export")
-    os.makedirs(out_dir, exist_ok=True)
-    
-    if link_shapes is None:
-        link_shapes = {}
-    
-    gpkg_path = os.path.join(out_dir, "shortest_path.gpkg")
-    
-    # Export path nodes
-    path_nodes_df = nodes_df[nodes_df["node_id"].isin(path_nodes)].copy()
-    gdf_path_nodes = gpd.GeoDataFrame(
-        path_nodes_df,
-        geometry=[Point(row["stop_lon"], row["stop_lat"]) for _, row in path_nodes_df.iterrows()],
-        crs="EPSG:4326",
-    )
-    
-    # Export path links
-    node_coord = nodes_df.set_index("node_id")[["stop_lat", "stop_lon"]].to_dict("index")
-    link_lookup = links_df.set_index(["from_node_id", "to_node_id"])
-    
-    path_links_data = []
-    n_with_shapes = 0
-    
-    for (f, t) in path_links:
-        try:
-            rows = link_lookup.loc[(f, t)]
-            row = rows.iloc[0] if isinstance(rows, pd.DataFrame) else rows
-            c1, c2 = node_coord.get(f), node_coord.get(t)
-            
-            if c1 and c2:
-                shape_coords = link_shapes.get((f, t))
-                
-                if shape_coords and len(shape_coords) >= 2:
-                    geom = LineString(shape_coords)
-                    n_with_shapes += 1
-                else:
-                    geom = LineString([(c1["stop_lon"], c1["stop_lat"]), (c2["stop_lon"], c2["stop_lat"])])
-                
-                path_links_data.append({
-                    "from_node_id": f,
-                    "to_node_id": t,
-                    "link_type": row.get("link_type", ""),
-                    "route_id": row.get("route_id", ""),
-                    "travel_time_min": row.get("travel_time_min", 0),
-                    "length_m": row.get("length_m", 0),
-                    "geometry": geom,
-                })
-        except KeyError:
-            continue
-    
-    if path_links_data:
-        gdf_path_links = gpd.GeoDataFrame(path_links_data, geometry="geometry", crs="EPSG:4326")
-    else:
-        gdf_path_links = gpd.GeoDataFrame(columns=["from_node_id", "to_node_id", "geometry"], crs="EPSG:4326")
-    
-    # Remove existing file
-    if os.path.exists(gpkg_path):
-        os.remove(gpkg_path)
-    
-    gdf_path_nodes.to_file(gpkg_path, layer="path_nodes", driver="GPKG")
-    gdf_path_links.to_file(gpkg_path, layer="path_links", driver="GPKG", mode="a")
-    
-    print(f"  Shortest path exported to: {gpkg_path}")
-    print(f"    - Layer 'path_nodes': {len(gdf_path_nodes)} nodes")
-    print(f"    - Layer 'path_links': {len(gdf_path_links)} links")
-    print(f"    - Links with route shapes: {n_with_shapes}")
-    print(f"    - Links with straight lines: {len(gdf_path_links) - n_with_shapes}")
-
-
 def build_network(
-    gtfs_zip_path=None,
+    gtfs_path=None,
     export_arcgis=True,
     export_gmns=False,
     verbose=True
@@ -818,7 +683,7 @@ def build_network(
     Main workflow: build the bus network from GTFS.
     
     Parameters:
-        gtfs_zip_path: path to GTFS zip file (default: GRT_GTFS.zip)
+        gtfs_path: path to GTFS directory (default: Data/Raw_GTFS)
         export_arcgis: export to GeoPackage for visualization
         export_gmns: export to GMNS format for AequilibraE
         verbose: print progress
@@ -827,16 +692,16 @@ def build_network(
         nodes_df: DataFrame of nodes (stop_id, route_id, coordinates, cluster_id)
         links_df: DataFrame of links (route segments, transfers, walking links)
     """
-    if gtfs_zip_path is None:
-        gtfs_zip_path = DEFAULT_GTFS_ZIP
+    if gtfs_path is None:
+        gtfs_path = DEFAULT_GTFS_PATH
     
     if verbose:
         print("\n=== Step 1: Load GTFS data ===")
-        print(f"  GTFS file: {gtfs_zip_path}")
+        print(f"  GTFS path: {gtfs_path}")
     
     if verbose:
         print("\n=== Step 2: Build bus network nodes and links ===")
-    nodes_df, links_df = build_nodes_and_links(gtfs_zip_path)
+    nodes_df, links_df = build_nodes_and_links(gtfs_path)
     
     if verbose:
         print(f"\n  Network built: {len(nodes_df)} nodes, {len(links_df)} links")
@@ -854,7 +719,7 @@ def build_network(
     if export_arcgis:
         if verbose:
             print("\n=== Step 4: Load route shapes from GTFS ===")
-        link_shapes = build_link_shape_lookup(gtfs_zip_path, nodes_df, links_df)
+        link_shapes = build_link_shape_lookup(gtfs_path, nodes_df, links_df)
         if verbose:
             print(f"  Found shapes for {len(link_shapes)} route links")
     
@@ -887,10 +752,10 @@ def build_network(
 
 
 if __name__ == "__main__":
-    gtfs_zip_path = "GRT_GTFS.zip"
+    gtfs_path = DEFAULT_GTFS_PATH
     
     nodes_df, links_df = build_network(
-        gtfs_zip_path=gtfs_zip_path,
+        gtfs_path=gtfs_path,
         export_arcgis=True,
         export_gmns=False,
         verbose=True
@@ -904,13 +769,21 @@ if __name__ == "__main__":
     print(f"  Finding path from node {orig_node} to node {dest_node}")
     print(f"  Cost parameters: FARE=${FARE_CONSTANT:.2f}, VALUE_OF_TIME=${VALUE_OF_TIME:.2f}/min")
     
-    result = shortest_path_bus(nodes_df, links_df, orig_node, dest_node, cost="time", verbose=False)
+    result = shortest_path_transit(
+        nodes_df, links_df, orig_node, dest_node,
+        cost="generalized",
+        fare=FARE_CONSTANT,
+        waiting_time_min=WAITING_TIME_MINUTES,
+        value_of_time=VALUE_OF_TIME,
+        verbose=True
+    )
     
     if result.get("found"):
         print(f"\n  Path found!")
         print(f"    Nodes in path: {len(result['path_nodes'])}")
         print(f"    Total time: {result['total_time_min']:.1f} min")
         print(f"    Total distance: {result['total_length_m']:.0f} m")
+        print(f"    Generalized cost: ${result['generalized_cost']:.2f}")
         
         details = compute_path_details(links_df, result["path_links"])
         print(f"\n  Path Statistics:")
@@ -921,13 +794,15 @@ if __name__ == "__main__":
         
         # Build link shapes for shortest path export
         print("\n=== Building link shapes for shortest path export ===")
-        link_shapes = build_link_shape_lookup(gtfs_zip_path, nodes_df, links_df)
+        link_shapes = build_link_shape_lookup(gtfs_path, nodes_df, links_df)
         print(f"  Found shapes for {len(link_shapes)} route links")
         
         print("\n=== Export shortest path to ArcGIS ===")
+        arcgis_dir = os.path.join(os.path.dirname(__file__), "arcgis_export")
         export_shortest_path_to_arcgis(
             nodes_df, links_df,
             result["path_nodes"], result["path_links"],
+            out_dir=arcgis_dir,
             link_shapes=link_shapes
         )
     else:

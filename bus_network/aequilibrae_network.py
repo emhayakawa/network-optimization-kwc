@@ -6,7 +6,7 @@ import os
 import shutil
 
 from .build_bus_network import build_nodes_and_links, export_to_gmns
-from .config import DEFAULT_GTFS_ZIP
+from .config import DEFAULT_GTFS_PATH
 
 
 def _fill_aequilibrae_ba_columns(project, direction_columns=None):
@@ -53,8 +53,8 @@ def create_aequilibrae_project(
     ----------
     project_path : str, optional
         Directory for the AequilibraE project. Default: bus_network/aequilibrae_project.
-    gtfs_zip_path : str, optional
-        Path to GTFS zip. Default: URA/GRT_GTFS.zip.
+    gtfs_path : str, optional
+        Path to GTFS directory. Default: Data/Raw_GTFS from config.
     transfer_minutes : float, optional
         Transfer time in minutes (default from config).
     srid : int
@@ -81,7 +81,7 @@ def create_aequilibrae_project(
     if overwrite and os.path.exists(project_path):
         shutil.rmtree(project_path)
 
-    nodes_df, links_df = build_nodes_and_links("GRT_GTFS.zip")
+    nodes_df, links_df = build_nodes_and_links(DEFAULT_GTFS_PATH)
     gmns_dir = os.path.join(base_dir, "data", "gmns")
     node_file, link_file, geometry_file = export_to_gmns(nodes_df, links_df, gmns_dir, srid=srid)
 

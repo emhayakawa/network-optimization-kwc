@@ -16,6 +16,11 @@ import sys
 import pandas as pd
 import numpy as np
 
+# Ensure URA root is in path for transit module
+_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _root not in sys.path:
+    sys.path.insert(0, _root)
+
 # Handle both module import and direct execution
 if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1156,7 +1161,7 @@ if __name__ == "__main__":
     # Test shortest path and export to GeoPackage
     print("\n=== Testing Shortest Path ===")
     
-    from shortest_path_ion import shortest_path_ion, export_shortest_path_to_arcgis
+    from transit.shortest_path import shortest_path_transit, export_shortest_path_to_arcgis
     
     # Find sample LRT and bus nodes
     lrt_nodes = nodes_df[nodes_df["mode"] == MODE_LRT]
@@ -1164,17 +1169,20 @@ if __name__ == "__main__":
     
     if len(lrt_nodes) > 0 and len(bus_nodes) > 0:
         # Pick a bus node and an LRT node
-        orig_node = int(456)#bus_nodes.iloc[0]["node_id"])
-        dest_node = int(971)#rt_nodes.iloc[len(lrt_nodes)//2]["node_id"])
+        orig_node = int(bus_nodes.iloc[0]["node_id"])
+        dest_node = int(lrt_nodes.iloc[len(lrt_nodes)//2]["node_id"])
         
         print(f"\n  Route: Bus stop -> LRT stop")
         print(f"  Origin node: {orig_node} (bus)")
         print(f"  Destination node: {dest_node} (LRT)")
         
-        result = shortest_path_ion(
-            nodes_df, links_df, 
-            orig_node, dest_node, 
+        result = shortest_path_transit(
+            nodes_df, links_df,
+            orig_node, dest_node,
             cost="generalized",
+            fare=FARE_CONSTANT,
+            waiting_time_min=WAITING_TIME_DEFAULT,
+            value_of_time=VALUE_OF_TIME,
             verbose=True
         )
         

@@ -26,11 +26,13 @@ STOP_CLUSTER_RADIUS_M = 50.0  # meters
 
 FARE_CONSTANT = 3.50          # flat fare in dollars
 WAITING_TIME_MINUTES = 7.5    # average wait time for bus at origin (minutes)
-VALUE_OF_TIME = 0.50          # dollars per minute (= $30/hour)
+VALUE_OF_TIME = 0.33          # dollars per minute ($20/hour)
 
 # Note: Road network uses VALUE_OF_TIME = $25/hour = $0.417/min
 # Transit typically uses same or slightly lower value
 
-# Default path to GTFS zip (relative to URA folder)
+# Default path to GTFS data (directory or zip)
 _URA_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_GTFS_ZIP = os.path.join(_URA_DIR, "GRT_GTFS.zip")
+_DATA_DIR = os.path.join(_URA_DIR, "Data")
+# Raw_GTFS directory (same as ion_network bus data)
+DEFAULT_GTFS_PATH = os.path.join(_DATA_DIR, "Raw_GTFS")
