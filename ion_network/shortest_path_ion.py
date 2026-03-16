@@ -1,0 +1,564 @@
+"""
+Shortest path on the multimodal ION network (bus + LRT) using generalized cost.
+
+Generalized Cost for Transit:
+    GC = FARE + (WAITING_TIME + In-Vehicle Time) × VALUE_OF_TIME
+
+Where:
+    - FARE: flat transit fare (applied once per trip)
+    - WAITING_TIME: average wait time at origin stop (applied once per trip)
+    - In-Vehicle Time: travel time on bus/LRT (from GTFS)
+    - VALUE_OF_TIME: time-to-money conversion ($/min)
+
+This module uses the same generalized cost formula as the bus network,
+enabling consistent comparison between bus-only and multimodal trips.
+"""
+import heapq
+import pandas as pd
+
+# Cost types
+COST_TIME = "time"
+COST_DISTANCE = "distance"
+COST_GENERALIZED = "generalized"
+
+# Default parameters (can be overridden in function calls)
+DEFAULT_FARE = 3.50           # dollars (GRT unified fare)
+DEFAULT_WAITING_TIME = 7.5    # minutes (average of bus and LRT)
+DEFAULT_VALUE_OF_TIME = 0.50  # dollars per minute ($30/hour)
+
+
+def _build_adjacency(links_df, cost_field):
+    """Build adjacency list from links DataFrame."""
+    adj = {}
+    for _, row in links_df.iterrows():
+        f, t = int(row["from_node_id"]), int(row["to_node_id"])
+        c = float(row[cost_field])
+        if f not in adj:
+            adj[f] = []
+        adj[f].append((t, c))
+    return adj
+
+
+def _build_adjacency_generalized(links_df, value_of_time):
+    """
+    Build adjacency list using generalized cost.
+    
+    Link cost = travel_time_min × value_of_time
+    (Fare and waiting time are added once at the trip level, not per link)
+    """
+    adj = {}
+    for _, row in links_df.iterrows():
+        f, t = int(row["from_node_id"]), int(row["to_node_id"])
+        travel_time = float(row["travel_time_min"])
+        cost = travel_time * value_of_time
+        if f not in adj:
+            adj[f] = []
+        adj[f].append((t, cost, travel_time))
+    return adj
+
+
+def shortest_path_ion(
+    nodes_df, 
+    links_df, 
+    orig_node_id, 
+    dest_node_id, 
+    cost="generalized",
+    fare=None,
+    waiting_time_min=None,
+    value_of_time=None,
+    verbose=True
+):
+    """
+    Compute shortest path on the multimodal ION network (Dijkstra).
+    
+    Parameters:
+        nodes_df: Network nodes DataFrame
+        links_df: Network links DataFrame
+        orig_node_id: Origin node ID
+        dest_node_id: Destination node ID
+        cost: "time", "distance", or "generalized"
+        fare: Transit fare in dollars (for generalized cost)
+        waiting_time_min: Average waiting time at origin (for generalized cost)
+        value_of_time: $/minute (for generalized cost)
+        verbose: Print results
+    
+    Returns:
+        dict: path_nodes, path_links, total_time_min, total_length_m, 
+              generalized_cost, modes_used, num_transfers, found
+    """
+    # Set defaults
+    if fare is None:
+        fare = DEFAULT_FARE
+    if waiting_time_min is None:
+        waiting_time_min = DEFAULT_WAITING_TIME
+    if value_of_time is None:
+        value_of_time = DEFAULT_VALUE_OF_TIME
+    
+    # Build adjacency based on cost type
+    if cost == COST_GENERALIZED:
+        adj = _build_adjacency_generalized(links_df, value_of_time)
+        use_generalized = True
+    else:
+        cost_field = "travel_time_min" if cost == COST_TIME else "length_m"
+        adj = _build_adjacency(links_df, cost_field)
+        use_generalized = False
+    
+    # Dijkstra's algorithm
+    orig_node_id = int(orig_node_id)
+    dest_node_id = int(dest_node_id)
+    
+    dist = {orig_node_id: 0.0}
+    pred = {orig_node_id: None}
+    pq = [(0.0, orig_node_id)]
+    
+    while pq:
+        d, u = heapq.heappop(pq)
+        if d > dist.get(u, float("inf")):
+            continue
+        if u == dest_node_id:
+            break
+        
+        for neighbor_data in adj.get(u, []):
+            if use_generalized:
+                v, c, _ = neighbor_data
+            else:
+                v, c = neighbor_data
+            
+            new_d = d + c
+            if new_d < dist.get(v, float("inf")):
+                dist[v] = new_d
+                pred[v] = u
+                heapq.heappush(pq, (new_d, v))
+    
+    # Check if path found
+    if dest_node_id not in pred:
+        if verbose:
+            print(f"No path found from {orig_node_id} to {dest_node_id}")
+        return {
+            "path_nodes": None,
+            "path_links": None,
+            "total_time_min": None,
+            "total_length_m": None,
+            "generalized_cost": None,
+            "modes_used": None,
+            "num_transfers": None,
+            "found": False,
+        }
+    
+    # Reconstruct path
+    path_nodes = []
+    u = dest_node_id
+    while u is not None:
+        path_nodes.append(u)
+        u = pred[u]
+    path_nodes.reverse()
+    
+    # Calculate totals
+    path_links = [(path_nodes[i], path_nodes[i + 1]) for i in range(len(path_nodes) - 1)]
+    link_lookup = links_df.set_index(["from_node_id", "to_node_id"])
+    
+    total_time_min = 0.0
+    total_length_m = 0.0
+    num_transfers = 0
+    num_multimodal_transfers = 0
+    modes_used = set()
+    routes_used = []
+    
+    for (f, t) in path_links:
+        try:
+            rows = link_lookup.loc[(f, t)]
+            row = rows.iloc[0] if isinstance(rows, pd.DataFrame) else rows
+            total_time_min += float(row["travel_time_min"])
+            total_length_m += float(row["length_m"])
+            
+            link_type = row.get("link_type", "")
+            mode = row.get("mode", "")
+            
+            if link_type == "transfer":
+                num_transfers += 1
+            elif link_type == "multimodal_transfer":
+                num_transfers += 1
+                num_multimodal_transfers += 1
+            elif link_type == "route":
+                if mode:
+                    modes_used.add(mode)
+                route_id = row.get("route_id")
+                if route_id and (not routes_used or routes_used[-1] != route_id):
+                    routes_used.append(route_id)
+        except KeyError:
+            continue
+    
+    # Calculate generalized cost
+    # GC = FARE + (WAITING_TIME + In-Vehicle Time) × VALUE_OF_TIME
+    total_travel_time = waiting_time_min + total_time_min
+    generalized_cost = fare + (total_travel_time * value_of_time)
+    
+    if verbose:
+        print(f"\nShortest path ({cost}): {orig_node_id} -> {dest_node_id}")
+        print(f"  In-vehicle time: {total_time_min:.2f} min")
+        print(f"  Total distance: {total_length_m:.0f} m ({total_length_m/1000:.2f} km)")
+        print(f"  Nodes: {len(path_nodes)}, Links: {len(path_links)}")
+        print(f"  Transfers: {num_transfers} (multimodal: {num_multimodal_transfers})")
+        print(f"  Modes used: {', '.join(sorted(modes_used)) if modes_used else 'N/A'}")
+        
+        if cost == COST_GENERALIZED:
+            print(f"\n  Generalized Cost Breakdown:")
+            print(f"    Fare: ${fare:.2f}")
+            print(f"    Waiting time: {waiting_time_min:.1f} min × ${value_of_time:.2f}/min = ${waiting_time_min * value_of_time:.2f}")
+            print(f"    In-vehicle time: {total_time_min:.1f} min × ${value_of_time:.2f}/min = ${total_time_min * value_of_time:.2f}")
+            print(f"    ─────────────────────────────────")
+            print(f"    TOTAL GENERALIZED COST: ${generalized_cost:.2f}")
+    
+    return {
+        "path_nodes": path_nodes,
+        "path_links": path_links,
+        "total_time_min": total_time_min,
+        "total_length_m": total_length_m,
+        "generalized_cost": generalized_cost,
+        "waiting_time_min": waiting_time_min,
+        "fare": fare,
+        "num_transfers": num_transfers,
+        "num_multimodal_transfers": num_multimodal_transfers,
+        "modes_used": list(modes_used),
+        "routes_used": routes_used,
+        "found": True,
+    }
+
+
+def compute_generalized_cost(
+    total_time_min,
+    fare=None,
+    waiting_time_min=None,
+    value_of_time=None
+):
+    """
+    Compute generalized cost for a transit trip.
+    
+    GC = FARE + (WAITING_TIME + In-Vehicle Time) × VALUE_OF_TIME
+    
+    Parameters:
+        total_time_min: In-vehicle travel time (minutes)
+        fare: Transit fare ($)
+        waiting_time_min: Wait time at origin (minutes)
+        value_of_time: $/minute
+    
+    Returns:
+        float: Generalized cost in dollars
+    """
+    if fare is None:
+        fare = DEFAULT_FARE
+    if waiting_time_min is None:
+        waiting_time_min = DEFAULT_WAITING_TIME
+    if value_of_time is None:
+        value_of_time = DEFAULT_VALUE_OF_TIME
+    
+    total_travel_time = waiting_time_min + total_time_min
+    return fare + (total_travel_time * value_of_time)
+
+
+def compute_path_details(nodes_df, links_df, path_nodes, path_links):
+    """
+    Compute detailed statistics for a path.
+    
+    Returns:
+        dict with total_length_m, total_travel_time_min, num_transfers, 
+             modes_used, routes_used, segments_by_mode
+    """
+    if not path_links:
+        return {
+            "total_length_m": 0,
+            "total_travel_time_min": 0,
+            "num_transfers": 0,
+            "modes_used": [],
+            "routes_used": [],
+            "segments_by_mode": {},
+        }
+    
+    link_lookup = links_df.set_index(["from_node_id", "to_node_id"])
+    node_modes = nodes_df.set_index("node_id")["mode"].to_dict()
+    
+    total_length_m = 0.0
+    total_travel_time_min = 0.0
+    num_transfers = 0
+    modes_used = set()
+    routes_used = []
+    segments_by_mode = {"bus": 0, "lrt": 0, "transfer": 0}
+    
+    for (f, t) in path_links:
+        try:
+            rows = link_lookup.loc[(f, t)]
+            row = rows.iloc[0] if isinstance(rows, pd.DataFrame) else rows
+            total_length_m += float(row["length_m"])
+            total_travel_time_min += float(row["travel_time_min"])
+            
+            link_type = row.get("link_type", "")
+            mode = row.get("mode", "")
+            
+            if "transfer" in link_type:
+                num_transfers += 1
+                segments_by_mode["transfer"] += 1
+            elif link_type == "route":
+                if mode == "bus":
+                    segments_by_mode["bus"] += 1
+                elif mode == "lrt":
+                    segments_by_mode["lrt"] += 1
+                if mode:
+                    modes_used.add(mode)
+                route_id = row.get("route_id")
+                if route_id and (not routes_used or routes_used[-1] != route_id):
+                    routes_used.append(route_id)
+        except KeyError:
+            continue
+    
+    return {
+        "total_length_m": total_length_m,
+        "total_travel_time_min": total_travel_time_min,
+        "num_transfers": num_transfers,
+        "modes_used": list(modes_used),
+        "routes_used": routes_used,
+        "segments_by_mode": segments_by_mode,
+    }
+
+
+def node_ids_at_stop(nodes_df, stop_id):
+    """Return list of node_ids for all nodes at the given stop_id."""
+    return nodes_df[nodes_df["stop_id"] == str(stop_id)]["node_id"].astype(int).tolist()
+
+
+def node_ids_by_mode(nodes_df, mode):
+    """Return list of node_ids for all nodes with the given mode."""
+    return nodes_df[nodes_df["mode"] == mode]["node_id"].astype(int).tolist()
+
+
+def check_connectivity(nodes_df, links_df, from_node_id, to_node_id, verbose=True):
+    """Check whether two nodes exist and whether a path exists between them."""
+    from collections import deque
+    
+    nids = set(nodes_df["node_id"].astype(int))
+    from_ok = int(from_node_id) in nids
+    to_ok = int(to_node_id) in nids
+    
+    if verbose:
+        print("Connectivity check:")
+        print(f"  Node {from_node_id} exists: {from_ok}")
+        print(f"  Node {to_node_id} exists: {to_ok}")
+    
+    if not from_ok or not to_ok:
+        return {"from_exists": from_ok, "to_exists": to_ok, "path_exists": False, "path_nodes": None}
+    
+    adj = {}
+    for _, row in links_df.iterrows():
+        f, t = int(row["from_node_id"]), int(row["to_node_id"])
+        if f not in adj:
+            adj[f] = []
+        adj[f].append(t)
+    
+    q = deque([int(from_node_id)])
+    pred = {int(from_node_id): None}
+    
+    while q:
+        u = q.popleft()
+        if u == int(to_node_id):
+            break
+        for v in adj.get(u, []):
+            if v not in pred:
+                pred[v] = u
+                q.append(v)
+    
+    path_exists = int(to_node_id) in pred
+    path_nodes = None
+    
+    if path_exists:
+        path_nodes = []
+        u = int(to_node_id)
+        while u is not None:
+            path_nodes.append(u)
+            u = pred[u]
+        path_nodes.reverse()
+    
+    if verbose:
+        print(f"  Path exists: {path_exists}")
+        if path_nodes:
+            print(f"  Path length: {len(path_nodes)} nodes")
+    
+    return {
+        "from_exists": from_ok, 
+        "to_exists": to_ok, 
+        "path_exists": path_exists, 
+        "path_nodes": path_nodes
+    }
+
+
+def export_shortest_path_to_arcgis(nodes_df, links_df, path_nodes, path_links, out_dir=None, link_shapes=None):
+    """
+    Export the shortest path to a GeoPackage for ArcGIS visualization.
+    
+    Parameters:
+        nodes_df: DataFrame of all nodes
+        links_df: DataFrame of all links  
+        path_nodes: list of node IDs in the path
+        path_links: list of (from_node_id, to_node_id) tuples
+        out_dir: output directory (default: arcgis_export in same folder)
+        link_shapes: dict of (from_node_id, to_node_id) -> list of (lon, lat) coords
+                     from GTFS shapes.txt for proper route geometry
+    """
+    import geopandas as gpd
+    from shapely.geometry import LineString, Point
+    import os
+    
+    if out_dir is None:
+        out_dir = os.path.join(os.path.dirname(__file__), "arcgis_export")
+    os.makedirs(out_dir, exist_ok=True)
+    
+    if link_shapes is None:
+        link_shapes = {}
+    
+    gpkg_path = os.path.join(out_dir, "shortest_path.gpkg")
+    
+    # Export path nodes
+    path_nodes_df = nodes_df[nodes_df["node_id"].isin(path_nodes)].copy()
+    gdf_path_nodes = gpd.GeoDataFrame(
+        path_nodes_df,
+        geometry=[Point(row["stop_lon"], row["stop_lat"]) for _, row in path_nodes_df.iterrows()],
+        crs="EPSG:4326",
+    )
+    
+    # Export path links
+    node_coord = nodes_df.set_index("node_id")[["stop_lat", "stop_lon"]].to_dict("index")
+    link_lookup = links_df.set_index(["from_node_id", "to_node_id"])
+    
+    path_links_data = []
+    n_with_shapes = 0
+    
+    for (f, t) in path_links:
+        try:
+            rows = link_lookup.loc[(f, t)]
+            row = rows.iloc[0] if isinstance(rows, pd.DataFrame) else rows
+            c1, c2 = node_coord.get(f), node_coord.get(t)
+            
+            if c1 and c2:
+                # Try to get shape geometry first (from GTFS shapes.txt)
+                shape_coords = link_shapes.get((f, t))
+                
+                if shape_coords and len(shape_coords) >= 2:
+                    # Use actual route shape geometry
+                    geom = LineString(shape_coords)
+                    n_with_shapes += 1
+                else:
+                    # Fall back to straight line
+                    geom = LineString([(c1["stop_lon"], c1["stop_lat"]), (c2["stop_lon"], c2["stop_lat"])])
+                
+                path_links_data.append({
+                    "from_node_id": f,
+                    "to_node_id": t,
+                    "link_type": row.get("link_type", ""),
+                    "route_id": row.get("route_id", ""),
+                    "mode": row.get("mode", ""),
+                    "travel_time_min": row.get("travel_time_min", 0),
+                    "length_m": row.get("length_m", 0),
+                    "geometry": geom,
+                })
+        except KeyError:
+            continue
+    
+    if path_links_data:
+        gdf_path_links = gpd.GeoDataFrame(path_links_data, geometry="geometry", crs="EPSG:4326")
+    else:
+        gdf_path_links = gpd.GeoDataFrame(columns=["from_node_id", "to_node_id", "geometry"], crs="EPSG:4326")
+    
+    if os.path.exists(gpkg_path):
+        os.remove(gpkg_path)
+    
+    gdf_path_nodes.to_file(gpkg_path, layer="path_nodes", driver="GPKG")
+    gdf_path_links.to_file(gpkg_path, layer="path_links", driver="GPKG", mode="a")
+    
+    print(f"  Shortest path exported to: {gpkg_path}")
+    print(f"    - Layer 'path_nodes': {len(gdf_path_nodes)} nodes")
+    print(f"    - Layer 'path_links': {len(gdf_path_links)} links")
+    print(f"    - Links with route shapes: {n_with_shapes}")
+    print(f"    - Links with straight lines: {len(gdf_path_links) - n_with_shapes}")
+
+
+if __name__ == "__main__":
+    import os
+    import sys
+    
+    # Load pre-built network from CSV
+    data_dir = os.path.join(os.path.dirname(__file__), "data")
+    nodes_path = os.path.join(data_dir, "nodes.csv")
+    links_path = os.path.join(data_dir, "links.csv")
+    
+    if not os.path.exists(nodes_path) or not os.path.exists(links_path):
+        print("ERROR: Network data not found. Run build_ion_network.py first.")
+        print(f"  Expected: {nodes_path}")
+        print(f"  Expected: {links_path}")
+        sys.exit(1)
+    
+    print("=== Multimodal ION Network Shortest Path ===\n")
+    
+    # Load network from CSV
+    print("Loading network from CSV...")
+    nodes_df = pd.read_csv(nodes_path)
+    links_df = pd.read_csv(links_path)
+    print(f"  Nodes: {len(nodes_df)}, Links: {len(links_df)}")
+    
+    # Summary by mode
+    print(f"\n  Nodes by mode:")
+    for mode, count in nodes_df["mode"].value_counts().items():
+        print(f"    - {mode}: {count}")
+    
+    print(f"\n  Links by type:")
+    for link_type, count in links_df["link_type"].value_counts().items():
+        print(f"    - {link_type}: {count}")
+    
+    # Pick sample origin/destination from different modes
+    bus_nodes = nodes_df[nodes_df["mode"] == "bus"]
+    lrt_nodes = nodes_df[nodes_df["mode"] == "lrt"]
+    
+    if len(bus_nodes) > 0 and len(lrt_nodes) > 0:
+        orig = int(bus_nodes.iloc[0]["node_id"])
+        dest = int(lrt_nodes.iloc[len(lrt_nodes)//2]["node_id"])
+        
+        print(f"\n=== Test: Bus -> LRT multimodal trip ===")
+        print(f"  Origin: node {orig} (bus)")
+        print(f"  Destination: node {dest} (LRT)")
+        
+        # Test by time
+        print("\n--- Cost = TIME ---")
+        result_time = shortest_path_ion(nodes_df, links_df, orig, dest, cost=COST_TIME)
+        
+        # Test by generalized cost
+        print("\n--- Cost = GENERALIZED ---")
+        result_gc = shortest_path_ion(
+            nodes_df, links_df, orig, dest, 
+            cost=COST_GENERALIZED,
+            fare=DEFAULT_FARE,
+            waiting_time_min=DEFAULT_WAITING_TIME,
+            value_of_time=DEFAULT_VALUE_OF_TIME
+        )
+        
+        if result_gc["found"]:
+            # Build link shapes for proper route geometry
+            print("\n=== Building Link Shapes ===")
+            from build_ion_network import build_link_shape_lookup
+            from config import BUS_GTFS_DIR, LRT_GTFS_DIR, LRT_ROUTE_PREFIX
+            
+            link_shapes = {}
+            print("  Loading bus route shapes...")
+            bus_shapes = build_link_shape_lookup(BUS_GTFS_DIR, nodes_df, links_df, route_prefix="")
+            link_shapes.update(bus_shapes)
+            print(f"    Found shapes for {len(bus_shapes)} bus links")
+            
+            print("  Loading LRT route shapes...")
+            lrt_shapes = build_link_shape_lookup(LRT_GTFS_DIR, nodes_df, links_df, route_prefix=LRT_ROUTE_PREFIX)
+            link_shapes.update(lrt_shapes)
+            print(f"    Found shapes for {len(lrt_shapes)} LRT links")
+            
+            print("\n=== Export to ArcGIS ===")
+            export_shortest_path_to_arcgis(
+                nodes_df, links_df,
+                result_gc["path_nodes"], result_gc["path_links"],
+                link_shapes=link_shapes
+            )
+    else:
+        print("Network does not have both bus and LRT nodes")
