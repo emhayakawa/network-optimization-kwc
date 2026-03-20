@@ -30,12 +30,13 @@ if __name__ == "__main__":
         ION_STOPS_CSV,
         ION_ROUTES_CSV,
         TRANSFER_TIME_BUS,
-        TRANSFER_TIME_LRT,
         TRANSFER_TIME_BUS_LRT,
-        STOP_CLUSTER_RADIUS_M,
+        BUS_CLUSTER_RADIUS_M,
+        MULTIMODAL_TRANSFER_RADIUS_M,
         FARE_CONSTANT,
         VALUE_OF_TIME,
-        WAITING_TIME_DEFAULT,
+        WAITING_TIME_BUS,
+        WAITING_TIME_LRT,
         MODE_BUS,
         MODE_LRT,
         LRT_ROUTE_PREFIX,
@@ -49,12 +50,13 @@ else:
         ION_STOPS_CSV,
         ION_ROUTES_CSV,
         TRANSFER_TIME_BUS,
-        TRANSFER_TIME_LRT,
         TRANSFER_TIME_BUS_LRT,
-        STOP_CLUSTER_RADIUS_M,
+        BUS_CLUSTER_RADIUS_M,
+        MULTIMODAL_TRANSFER_RADIUS_M,
         FARE_CONSTANT,
         VALUE_OF_TIME,
-        WAITING_TIME_DEFAULT,
+        WAITING_TIME_BUS,
+        WAITING_TIME_LRT,
         MODE_BUS,
         MODE_LRT,
         LRT_ROUTE_PREFIX,
@@ -230,7 +232,7 @@ def cluster_nearby_stops(stops_df, cluster_radius_m=None):
         stops_df with cluster_id, cluster_lat, cluster_lon columns
     """
     if cluster_radius_m is None:
-        cluster_radius_m = STOP_CLUSTER_RADIUS_M
+        cluster_radius_m = BUS_CLUSTER_RADIUS_M
     
     stops = stops_df.copy()
     stops["stop_id"] = stops["stop_id"].astype(str)
@@ -291,8 +293,8 @@ def build_bus_network_component(bus_gtfs=None):
     
     print(f"  Routes: {len(data['routes'])}, Stops: {len(stops)}, Trips: {len(trips)}")
     
-    # Cluster nearby stops
-    stops = cluster_nearby_stops(stops, STOP_CLUSTER_RADIUS_M)
+    # Cluster nearby stops (same radius as bus_network for identical bus nodes/coordinates)
+    stops = cluster_nearby_stops(stops, BUS_CLUSTER_RADIUS_M)
     
     # Join stop_times with trips to get route_id
     st = stop_times.merge(trips[["trip_id", "route_id"]], on="trip_id", how="left")
@@ -375,13 +377,31 @@ def build_bus_network_component(bus_gtfs=None):
     
     # Create DataFrame (already unique by construction)
     links_df = pd.DataFrame(route_links)
-    
-    # Add reverse direction
-    rev = links_df.copy()
-    rev = rev.rename(columns={"from_node_id": "to_node_id", "to_node_id": "from_node_id"})
-    rev["link_id"] = np.arange(len(links_df) + 1, len(links_df) + len(rev) + 1)
-    links_df["link_id"] = np.arange(1, len(links_df) + 1)
-    links_df = pd.concat([links_df, rev], ignore_index=True)
+
+    # Add reverse direction only when the route actually runs both ways (reverse segment exists in trips)
+    rev_links = []
+    node_to_stop = nodes_df.set_index("node_id")["stop_id"].to_dict()
+    for _, row in links_df.iterrows():
+        n1, n2 = row["from_node_id"], row["to_node_id"]
+        s1, s2 = node_to_stop.get(n1), node_to_stop.get(n2)
+        route_id = row["route_id"]
+        if s1 is not None and s2 is not None and (str(s2), str(s1), route_id) in segment_times:
+            rev_links.append({
+                "from_node_id": n2,
+                "to_node_id": n1,
+                "link_type": "route",
+                "route_id": route_id,
+                "travel_time_min": row["travel_time_min"],
+                "length_m": row["length_m"],
+                "mode": MODE_BUS,
+            })
+    if rev_links:
+        rev_df = pd.DataFrame(rev_links)
+        rev_df["link_id"] = np.arange(len(links_df) + 1, len(links_df) + len(rev_df) + 1)
+        links_df["link_id"] = np.arange(1, len(links_df) + 1)
+        links_df = pd.concat([links_df, rev_df], ignore_index=True)
+    else:
+        links_df["link_id"] = np.arange(1, len(links_df) + 1)
     
     print(f"  Bus route links: {len(links_df)}")
     
@@ -584,24 +604,15 @@ def build_lrt_network_component(lrt_gtfs=None, ion_stops_csv=None, ion_routes_cs
         extension_links = pd.DataFrame()
     
     # Combine GTFS + extension links
+    # GTFS segments and extension links already include both directions when they exist in trip data
     links_parts = [gtfs_links_df]
     if len(extension_links) > 0:
         links_parts.append(extension_links)
     
     links_df = pd.concat(links_parts, ignore_index=True)
-    
-    # Add reverse direction for LRT links (trains run both ways)
-    rev = links_df.copy()
-    rev = rev.rename(columns={"from_node_id": "to_node_id", "to_node_id": "from_node_id"})
-    rev["link_id"] = np.arange(len(links_df) + 1, len(links_df) + len(rev) + 1)
-    links_df["link_id"] = np.arange(1, len(links_df) + 1)
-    links_df = pd.concat([links_df, rev], ignore_index=True)
-    
-    # Deduplicate (in case reverse already exists)
-    links_df = links_df.drop_duplicates(subset=["from_node_id", "to_node_id"], keep="first")
     links_df["link_id"] = np.arange(1, len(links_df) + 1)
     
-    print(f"  Total LRT links (with reverse): {len(links_df)}")
+    print(f"  Total LRT links: {len(links_df)}")
     
     # Diagnostic: check for disconnected nodes
     all_node_ids = set(nodes_df["node_id"].astype(int))
@@ -674,8 +685,8 @@ def merge_networks(bus_nodes, bus_links, lrt_nodes, lrt_links):
             
             dist = _haversine_m_local(lrt_lat, lrt_lon, bus_lat, bus_lon)
             
-            # Create transfer if within cluster radius
-            if dist <= STOP_CLUSTER_RADIUS_M:
+            # Create transfer if within multimodal transfer radius
+            if dist <= MULTIMODAL_TRANSFER_RADIUS_M:
                 # Bus -> LRT
                 multimodal_links.append({
                     "link_id": next_link_id,
@@ -756,31 +767,19 @@ def build_nodes_and_links(bus_gtfs=None, lrt_gtfs=None, ion_stops_csv=None, ion_
     return nodes_df, links_df
 
 
-def save_network(nodes_df, links_df, out_dir, verbose=True):
-    """Save nodes and links to CSV."""
-    os.makedirs(out_dir, exist_ok=True)
-    nodes_path = os.path.join(out_dir, "nodes.csv")
-    links_path = os.path.join(out_dir, "links.csv")
-    nodes_df.to_csv(nodes_path, index=False)
-    links_df.to_csv(links_path, index=False)
-    if verbose:
-        print(f"  Nodes saved to: {nodes_path}")
-        print(f"  Links saved to: {links_path}")
-
-
-def export_to_gmns(nodes_df, links_df, out_dir, srid=26917):
+def save_network_data(nodes_df, links_df, link_shapes, out_dir, srid=26917, verbose=True):
     """
-    Export ION (bus + LRT) network to GMNS format for AequilibraE import.
+    Save ION network to node.csv, link.csv, geometry.csv (canonical output for ArcGIS and AequilibraE).
     
-    Writes node.csv, link.csv, and geometry.csv.
-    Node coordinates are transformed from WGS84 (stop_lat, stop_lon) to the given SRID.
+    Geometry uses link_shapes (GTFS route shapes) for route links, straight lines for others.
     """
     import geopandas as gpd
     from shapely.geometry import LineString
-    
+    from shapely.ops import transform
+    import pyproj
+
     os.makedirs(out_dir, exist_ok=True)
     
-    # Transform node coordinates from WGS84 to project CRS
     gdf_nodes = gpd.GeoDataFrame(
         nodes_df,
         geometry=gpd.points_from_xy(nodes_df["stop_lon"], nodes_df["stop_lat"]),
@@ -789,8 +788,6 @@ def export_to_gmns(nodes_df, links_df, out_dir, srid=26917):
     gdf_nodes = gdf_nodes.to_crs(f"EPSG:{srid}")
     gdf_nodes["x_coord"] = gdf_nodes.geometry.x
     gdf_nodes["y_coord"] = gdf_nodes.geometry.y
-    
-    # AequilibraE rejects multiple nodes at same location. Offset duplicate nodes.
     if "cluster_id" in gdf_nodes.columns:
         delta_m = 0.5
         for cluster_id, idxs in gdf_nodes.groupby("cluster_id").groups.items():
@@ -799,52 +796,117 @@ def export_to_gmns(nodes_df, links_df, out_dir, srid=26917):
             for i, idx in enumerate(idxs):
                 gdf_nodes.loc[idx, "x_coord"] = gdf_nodes.loc[idx, "x_coord"] + (i % 10) * delta_m
                 gdf_nodes.loc[idx, "y_coord"] = gdf_nodes.loc[idx, "y_coord"] + (i // 10) * delta_m
-    else:
-        stop_key = (
-            gdf_nodes["stop_lat"].round(6).astype(str) + "_" + gdf_nodes["stop_lon"].round(6).astype(str)
-        )
-        delta_m = 0.5
-        for _, idxs in stop_key.groupby(stop_key).groups.items():
-            if len(idxs) <= 1:
-                continue
-            for i, idx in enumerate(idxs):
-                gdf_nodes.loc[idx, "x_coord"] = gdf_nodes.loc[idx, "x_coord"] + (i % 10) * delta_m
-                gdf_nodes.loc[idx, "y_coord"] = gdf_nodes.loc[idx, "y_coord"] + (i // 10) * delta_m
     
     node_file = os.path.join(out_dir, "node.csv")
-    gdf_nodes[["node_id", "x_coord", "y_coord"]].to_csv(node_file, index=False)
+    node_cols = ["node_id", "x_coord", "y_coord"]
+    extra = [c for c in ["stop_id", "route_id", "stop_lat", "stop_lon", "cluster_id", "mode"] if c in gdf_nodes.columns]
+    gdf_nodes[node_cols + extra].to_csv(node_file, index=False)
     
-    # Build node_id -> (x, y) for link geometry
-    coord = gdf_nodes.set_index("node_id")[["x_coord", "y_coord"]].to_dict("index")
-    
-    # GMNS links
-    links_export = links_df[["link_id", "from_node_id", "to_node_id", "length_m", "travel_time_min"]].copy()
-    links_export["directed"] = 1
-    links_export["geometry_id"] = links_export["link_id"]
-    links_export["allowed_uses"] = "transit"
-    links_export["lanes"] = 1
-    links_export["length"] = links_export["length_m"]
-    links_export["travel_time"] = links_export["travel_time_min"]
+    # Links: match links.csv schema (link_id, from_node_id, to_node_id, link_type, route_id, travel_time_min, length_m, mode)
+    link_cols = ["link_id", "from_node_id", "to_node_id", "link_type", "route_id", "travel_time_min", "length_m", "mode"]
+    link_cols = [c for c in link_cols if c in links_df.columns]
+    links_export = links_df[link_cols].copy()
     link_file = os.path.join(out_dir, "link.csv")
-    links_export[
-        ["link_id", "from_node_id", "to_node_id", "directed", "length",
-         "geometry_id", "allowed_uses", "lanes", "travel_time"]
-    ].to_csv(link_file, index=False)
+    links_export.to_csv(link_file, index=False)
     
-    # Geometry (straight lines between nodes for GMNS)
+    # For transfer/multimodal links: use display coords so zero-length links get visible geometry
+    node_xy = gdf_nodes.set_index("node_id")[["x_coord", "y_coord"]].to_dict("index")
+    node_coord = nodes_df.set_index("node_id")[["stop_lat", "stop_lon"]].to_dict("index")
+    transformer = pyproj.Transformer.from_crs("EPSG:4326", f"EPSG:{srid}", always_xy=True)
+    TRANSFER_LINK_MIN_M = 2.0  # min visible length for zero-length links
     geoms = []
+    n_with_shapes = 0
     for _, row in links_df.iterrows():
         f, t = int(row["from_node_id"]), int(row["to_node_id"])
-        pf = coord.get(f, {})
-        pt = coord.get(t, {})
-        if pf and pt:
-            line = LineString([(pf["x_coord"], pf["y_coord"]), (pt["x_coord"], pt["y_coord"])])
-            geoms.append({"geometry_id": row["link_id"], "geometry": line.wkt})
+        shape_coords = link_shapes.get((f, t)) if link_shapes else None
+        if shape_coords and len(shape_coords) >= 2:
+            line = LineString(shape_coords)
+            n_with_shapes += 1
+            line_proj = transform(transformer.transform, line)
+        else:
+            xy1 = node_xy.get(f)
+            xy2 = node_xy.get(t)
+            if xy1 and xy2:
+                x1, y1 = float(xy1["x_coord"]), float(xy1["y_coord"])
+                x2, y2 = float(xy2["x_coord"]), float(xy2["y_coord"])
+                line_proj = LineString([(x1, y1), (x2, y2)])
+                # Ensure transfer links are visible in ArcGIS (avoid zero-length)
+                if row.get("link_type") in ("transfer", "multimodal_transfer"):
+                    dx, dy = x2 - x1, y2 - y1
+                    d = (dx**2 + dy**2) ** 0.5
+                    if d < TRANSFER_LINK_MIN_M:
+                        if d < 1e-6:
+                            x2, y2 = x1 + TRANSFER_LINK_MIN_M, y1
+                        else:
+                            x2 = x1 + dx * (TRANSFER_LINK_MIN_M / d)
+                            y2 = y1 + dy * (TRANSFER_LINK_MIN_M / d)
+                        line_proj = LineString([(x1, y1), (x2, y2)])
+            else:
+                c1, c2 = node_coord.get(f), node_coord.get(t)
+                if c1 and c2:
+                    line = LineString([(float(c1["stop_lon"]), float(c1["stop_lat"])), (float(c2["stop_lon"]), float(c2["stop_lat"]))])
+                    line_proj = transform(transformer.transform, line)
+                else:
+                    continue
+        geoms.append({"geometry_id": row["link_id"], "geometry": line_proj.wkt})
     geom_df = pd.DataFrame(geoms)
     geometry_file = os.path.join(out_dir, "geometry.csv")
     geom_df.to_csv(geometry_file, index=False)
     
+    if verbose:
+        print(f"  Saved to {out_dir}:")
+        print(f"    - node.csv: {len(gdf_nodes)} nodes")
+        print(f"    - link.csv: {len(links_df)} links")
+        print(f"    - geometry.csv: {len(geom_df)} geometries ({n_with_shapes} with route shapes)")
     return node_file, link_file, geometry_file
+
+
+def export_to_arcgis_from_data(data_dir, gpkg_path, verbose=True):
+    """Create ArcGIS GeoPackage from saved node.csv, link.csv, geometry.csv."""
+    from shapely import wkt
+
+    node_file = os.path.join(data_dir, "node.csv")
+    link_file = os.path.join(data_dir, "link.csv")
+    geometry_file = os.path.join(data_dir, "geometry.csv")
+    for f in [node_file, link_file, geometry_file]:
+        if not os.path.exists(f):
+            raise FileNotFoundError(f"Missing {f} - run build_network first")
+    
+    nodes_df = pd.read_csv(node_file)
+    links_df = pd.read_csv(link_file)
+    geom_df = pd.read_csv(geometry_file)
+    
+    import geopandas as gpd
+    gdf_nodes = gpd.GeoDataFrame(
+        nodes_df,
+        geometry=gpd.points_from_xy(nodes_df["x_coord"], nodes_df["y_coord"]),
+        crs="EPSG:26917",
+    )
+    gdf_nodes = gdf_nodes.to_crs("EPSG:4326")
+    
+    geom_lookup = geom_df.set_index("geometry_id")["geometry"].to_dict()
+    link_geoms = []
+    for _, row in links_df.iterrows():
+        wkt_str = geom_lookup.get(row["link_id"])
+        link_geoms.append(wkt.loads(wkt_str) if wkt_str else None)
+    links_df = links_df.copy()
+    links_df["geometry"] = link_geoms
+    gdf_links = gpd.GeoDataFrame(
+        links_df.dropna(subset=["geometry"]),
+        geometry="geometry",
+        crs="EPSG:26917",
+    )
+    gdf_links = gdf_links.to_crs("EPSG:4326")
+    
+    os.makedirs(os.path.dirname(gpkg_path) or ".", exist_ok=True)
+    if os.path.exists(gpkg_path):
+        os.remove(gpkg_path)
+    gdf_nodes.to_file(gpkg_path, layer="nodes", driver="GPKG")
+    gdf_links.to_file(gpkg_path, layer="links", driver="GPKG", mode="a")
+    
+    if verbose:
+        print(f"  ArcGIS export: {gpkg_path}")
+        print(f"    - Nodes: {len(gdf_nodes)}, Links: {len(gdf_links)}")
 
 
 def load_gtfs_shapes(gtfs_dir):
@@ -874,6 +936,7 @@ def build_link_shape_lookup(gtfs_dir, nodes_df, links_df, route_prefix=""):
     Build a lookup from (from_node_id, to_node_id) to shape geometry.
     
     For each route link, finds the segment of the shape between the two stops.
+    Uses trip-specific shapes when routes have multiple shapes (e.g., directions).
     
     Parameters:
         gtfs_dir: Path to GTFS directory
@@ -884,15 +947,11 @@ def build_link_shape_lookup(gtfs_dir, nodes_df, links_df, route_prefix=""):
     Returns:
         dict: (from_node_id, to_node_id) -> list of (lon, lat) coordinates
     """
-    from shapely.geometry import Point
-    from shapely.ops import nearest_points
-    
     # Load shapes
     shape_coords = load_gtfs_shapes(gtfs_dir)
     if not shape_coords:
         return {}
     
-    # Load trips to get shape_id for each route
     trips_file = os.path.join(gtfs_dir, "trips.txt")
     if not os.path.exists(trips_file):
         return {}
@@ -901,15 +960,29 @@ def build_link_shape_lookup(gtfs_dir, nodes_df, links_df, route_prefix=""):
     trips_df["route_id"] = trips_df["route_id"].astype(str)
     trips_df["shape_id"] = trips_df["shape_id"].astype(str)
     
-    # Get one shape_id per route (first one)
-    # Add prefix to match how routes are stored in the network
+    # Build (from_stop, to_stop, route_id) -> shape_id from trips that serve both stops in order
+    segment_to_shape = {}
+    stop_times_file = os.path.join(gtfs_dir, "stop_times.txt")
+    if os.path.exists(stop_times_file):
+        stop_times = pd.read_csv(stop_times_file)
+        stop_times["stop_id"] = stop_times["stop_id"].astype(str)
+        st_trips = stop_times.merge(trips_df[["trip_id", "route_id", "shape_id"]], on="trip_id", how="left")
+        for (route_id, trip_id), grp in st_trips.groupby(["route_id", "trip_id"]):
+            grp = grp.sort_values("stop_sequence")
+            stops = grp["stop_id"].tolist()
+            shape_id = grp["shape_id"].iloc[0]
+            for i in range(len(stops) - 1):
+                key = (stops[i], stops[i + 1], str(route_id))
+                if key not in segment_to_shape:
+                    segment_to_shape[key] = shape_id
+    
+    # Fallback: one shape per route
     route_to_shape = {}
     for route_id, shape_id in trips_df.groupby("route_id")["shape_id"].first().items():
         route_to_shape[route_prefix + str(route_id)] = shape_id
     
-    # Build node coordinate lookup
+    node_to_stop = nodes_df.set_index("node_id")["stop_id"].astype(str).to_dict()
     node_coords = nodes_df.set_index("node_id")[["stop_lat", "stop_lon"]].to_dict("index")
-    node_routes = nodes_df.set_index("node_id")["route_id"].to_dict()
     
     # Build link shape lookup
     link_shapes = {}
@@ -925,7 +998,15 @@ def build_link_shape_lookup(gtfs_dir, nodes_df, links_df, route_prefix=""):
             continue
         
         route_id = str(route_id)
-        shape_id = route_to_shape.get(route_id)
+        from_stop = node_to_stop.get(from_node)
+        to_stop = node_to_stop.get(to_node)
+        # Base route for GTFS lookup (without prefix)
+        base_route = route_id[len(route_prefix):] if route_prefix and route_id.startswith(route_prefix) else route_id
+        shape_id = None
+        if from_stop and to_stop:
+            shape_id = segment_to_shape.get((from_stop, to_stop, base_route))
+        if not shape_id:
+            shape_id = route_to_shape.get(route_id)
         
         if not shape_id or shape_id not in shape_coords:
             continue
@@ -950,15 +1031,29 @@ def build_link_shape_lookup(gtfs_dir, nodes_df, links_df, route_prefix=""):
         
         # Extract segment (handle both directions)
         if from_idx <= to_idx:
-            segment = coords[from_idx:to_idx + 1]
+            segment = list(coords[from_idx:to_idx + 1])
         else:
-            segment = coords[to_idx:from_idx + 1][::-1]
+            segment = list(coords[to_idx:from_idx + 1][::-1])
         
         # Ensure we have at least 2 points
         if len(segment) < 2:
             segment = [from_pt, to_pt]
+        else:
+            # Ensure link passes through nodes (stops may be offset from road centerline)
+            segment[0] = from_pt
+            segment[-1] = to_pt
         
         link_shapes[(from_node, to_node)] = segment
+    
+    # For reverse route links: use reversed forward segment when forward has proper route geometry.
+    for _, link in route_links.iterrows():
+        from_node = int(link["from_node_id"])
+        to_node = int(link["to_node_id"])
+        rev_segment = link_shapes.get((to_node, from_node))
+        if rev_segment and len(rev_segment) >= 3:
+            existing = link_shapes.get((from_node, to_node))
+            if not existing or len(existing) < 3:
+                link_shapes[(from_node, to_node)] = list(reversed(rev_segment))
     
     return link_shapes
 
@@ -977,22 +1072,205 @@ def _find_closest_point_idx(coords, target):
     return min_idx
 
 
-def export_to_arcgis(nodes_df, links_df, out_path, bus_gtfs=None, lrt_gtfs=None, format="gpkg"):
+# Extension stop IDs (Fairway + Cambridge extension)
+_EXTENSION_STOP_IDS = {"6108", "6016", "10001", "10002", "10003", "10004", "10005", "10006", "10007"}
+
+# Max distance (m) from stop to path for "passes through" verification
+_VERIFY_STOP_TOLERANCE_M = 150
+
+
+def _haversine_m(lat1, lon1, lat2, lon2):
+    """Distance in meters between two WGS84 points."""
+    R = 6371000
+    phi1, phi2 = np.radians(lat1), np.radians(lat2)
+    dphi = np.radians(lat2 - lat1)
+    dlam = np.radians(lon2 - lon1)
+    a = np.sin(dphi / 2) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlam / 2) ** 2
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
+    return R * c
+
+
+def verify_extension_geometry_passes_through_stops(extension_coords, stops_df, tolerance_m=None):
+    """
+    Verify that the extension path (from GeoJSON) passes through all extension stops.
+    Returns dict of stop_id -> (distance_m, passed).
+    """
+    if tolerance_m is None:
+        tolerance_m = _VERIFY_STOP_TOLERANCE_M
+    if len(extension_coords) < 2:
+        return {}
+
+    ext_stops = stops_df[stops_df["stop_id"].astype(str).isin(_EXTENSION_STOP_IDS)]
+    results = {}
+    for _, row in ext_stops.iterrows():
+        sid = str(row["stop_id"])
+        lat, lon = float(row["stop_lat"]), float(row["stop_lon"])
+        min_d = float("inf")
+        for pt in extension_coords:
+            d = _haversine_m(lat, lon, pt[1], pt[0])
+            min_d = min(min_d, d)
+        results[sid] = (min_d, min_d <= tolerance_m)
+    return results
+
+
+def _load_extension_geometry_from_geojson(geojson_path):
+    """
+    Load LRT route geometry from ION_Routes.geojson for the Cambridge extension corridor.
+    Returns a single ordered list of (lon, lat) forming the path from Fairway to Cambridge Terminus.
+    """
+    import json
+
+    if not geojson_path or not os.path.exists(geojson_path):
+        return []
+
+    with open(geojson_path) as f:
+        data = json.load(f)
+
+    # Extension corridor: Fairway (43.42, -80.44) to Cambridge (43.36, -80.31)
+    ext_bbox = (43.35, 43.43, -80.46, -80.30)  # min_lat, max_lat, min_lon, max_lon
+
+    def in_extension(coords):
+        lons = [c[0] for c in coords]
+        lats = [c[1] for c in coords]
+        return (min(lats) < ext_bbox[1] and max(lats) > ext_bbox[0] and
+                min(lons) > ext_bbox[2] and max(lons) < ext_bbox[3])
+
+    # Only Stage2=LRT where Stage1 is not LRT: extension corridor (Fairway to Cambridge).
+    # Stage1=LRT (Conestoga to Fairway) is already in GTFS(withLRT).
+    def is_stage2_extension(props):
+        s1, s2 = props.get("Stage1"), props.get("Stage2")
+        return s2 == "LRT" and s1 != "LRT"
+
+    segments = []
+    for feat in data.get("features", []):
+        if not is_stage2_extension(feat.get("properties", {})):
+            continue
+        geom = feat.get("geometry", {})
+        if geom.get("type") == "LineString":
+            coords = list(geom.get("coordinates", []))
+        elif geom.get("type") == "MultiLineString":
+            coords = []
+            for part in geom.get("coordinates", []):
+                coords.extend(part)
+        else:
+            continue
+        if len(coords) >= 2 and in_extension(coords):
+            segments.append(coords)
+
+    if not segments:
+        return []
+
+    # Stitch segments into one path (north to south: Fairway 43.42 -> Cambridge 43.36)
+    def dist_sq(a, b):
+        return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+
+    path = []
+    used = [False] * len(segments)
+    # Start with northernmost segment (highest avg lat)
+    best_idx = max(range(len(segments)), key=lambda i: sum(c[1] for c in segments[i]) / len(segments[i]))
+    path = list(segments[best_idx])
+    used[best_idx] = True
+
+    while True:
+        end_pt = path[-1]
+        best_next = None
+        best_dist = float("inf")
+        for i, seg in enumerate(segments):
+            if used[i]:
+                continue
+            d1, d2 = dist_sq(seg[0], end_pt), dist_sq(seg[-1], end_pt)
+            if d1 < best_dist:
+                best_dist, best_next = d1, (i, list(reversed(seg)))
+            if d2 < best_dist:
+                best_dist, best_next = d2, (i, list(seg))
+        if best_next is None or best_dist > 0.01:  # 0.01 deg ~ 1km gap tolerance
+            break
+        idx, coords = best_next
+        used[idx] = True
+        path.extend(coords[1:])
+
+    return path
+
+
+def build_extension_link_shapes(nodes_df, links_df, geojson_path):
+    """
+    Build link shapes for ION extension links using geometry from ION_Routes.geojson.
+    Extension links connect Fairway (6108/6016) to Sportsworld (10001) and sequential extension stops.
+    """
+    extension_coords = _load_extension_geometry_from_geojson(geojson_path)
+    if len(extension_coords) < 2:
+        return {}
+
+    node_to_stop = nodes_df.set_index("node_id")["stop_id"].astype(str).to_dict()
+    node_coords = nodes_df.set_index("node_id")[["stop_lat", "stop_lon"]].to_dict("index")
+
+    link_shapes = {}
+    route_links = links_df[links_df["link_type"] == "route"]
+
+    for _, link in route_links.iterrows():
+        from_node = int(link["from_node_id"])
+        to_node = int(link["to_node_id"])
+        from_stop = node_to_stop.get(from_node)
+        to_stop = node_to_stop.get(to_node)
+        if not from_stop or not to_stop:
+            continue
+        if from_stop not in _EXTENSION_STOP_IDS or to_stop not in _EXTENSION_STOP_IDS:
+            continue
+
+        c1 = node_coords.get(from_node)
+        c2 = node_coords.get(to_node)
+        if not c1 or not c2:
+            continue
+
+        from_pt = (float(c1["stop_lon"]), float(c1["stop_lat"]))
+        to_pt = (float(c2["stop_lon"]), float(c2["stop_lat"]))
+
+        from_idx = _find_closest_point_idx(extension_coords, from_pt)
+        to_idx = _find_closest_point_idx(extension_coords, to_pt)
+
+        if from_idx <= to_idx:
+            segment = list(extension_coords[from_idx : to_idx + 1])
+        else:
+            segment = list(extension_coords[to_idx : from_idx + 1][::-1])
+
+        if len(segment) < 2:
+            segment = [from_pt, to_pt]
+        else:
+            # Ensure link passes through stops when path does not (GeoJSON may not reach Fairway/Delta)
+            d_from = _haversine_m(c1["stop_lat"], c1["stop_lon"], segment[0][1], segment[0][0])
+            d_to = _haversine_m(c2["stop_lat"], c2["stop_lon"], segment[-1][1], segment[-1][0])
+            if d_from > _VERIFY_STOP_TOLERANCE_M:
+                segment = [from_pt] + segment
+            if d_to > _VERIFY_STOP_TOLERANCE_M:
+                segment = segment + [to_pt]
+
+        link_shapes[(from_node, to_node)] = segment
+
+    # Reverse shapes for opposite direction
+    for (fn, tn), seg in list(link_shapes.items()):
+        if (tn, fn) not in link_shapes and len(seg) >= 3:
+            link_shapes[(tn, fn)] = list(reversed(seg))
+
+    return link_shapes
+
+
+def export_to_arcgis(nodes_df, links_df, out_path, bus_gtfs=None, lrt_gtfs=None, ion_routes_geojson=None, format="gpkg"):
     """
     Export network to GeoPackage for ArcGIS/QGIS visualization.
     
-    Uses GTFS shapes.txt for route link geometry so links follow actual roads.
+    Uses GTFS shapes.txt for route link geometry and ION_Routes.geojson for extension.
     """
     import geopandas as gpd
     from shapely.geometry import LineString, Point
-    
+
+    # Extension links use straight lines when ion_routes_geojson is not provided
     if len(nodes_df) == 0:
         print("No nodes to export")
         return
-    
+
     nodes_df = nodes_df.copy()
     links_df = links_df.copy()
-    
+
     # Build shape lookup for route links
     link_shapes = {}
     if bus_gtfs:
@@ -1000,12 +1278,17 @@ def export_to_arcgis(nodes_df, links_df, out_path, bus_gtfs=None, lrt_gtfs=None,
         bus_shapes = build_link_shape_lookup(bus_gtfs, nodes_df, links_df, route_prefix="")
         link_shapes.update(bus_shapes)
         print(f"    Found shapes for {len(bus_shapes)} bus links")
-    
+
     if lrt_gtfs:
         print("  Loading LRT route shapes...")
         lrt_shapes = build_link_shape_lookup(lrt_gtfs, nodes_df, links_df, route_prefix=LRT_ROUTE_PREFIX)
         link_shapes.update(lrt_shapes)
         print(f"    Found shapes for {len(lrt_shapes)} LRT links")
+
+    ext_shapes = build_extension_link_shapes(nodes_df, links_df, ion_routes_geojson) if ion_routes_geojson else {}
+    if ext_shapes:
+        link_shapes.update(ext_shapes)
+        print(f"    Found shapes for {len(ext_shapes)} extension links")
     
     node_coord = nodes_df.set_index("node_id")[["stop_lat", "stop_lon"]].to_dict("index")
     
@@ -1067,31 +1350,35 @@ def build_network(
     ion_stops_csv=None,
     ion_routes_csv=None,
     export_arcgis=True,
-    export_gmns=False,
     export_aequilibrae=False,
     verbose=True
 ):
     """
     Main workflow: build the multimodal ION network (bus + LRT).
     
+    Outputs node.csv, link.csv, geometry.csv to data/ (canonical format).
+    ArcGIS gpkg is created FROM these saved files when export_arcgis=True.
+    
     Parameters:
         bus_gtfs: Path to bus GTFS directory (default: Raw_GTFS)
         lrt_gtfs: Path to LRT GTFS directory (default: GTFS(onlyLRT))
         ion_stops_csv: Path to ION_Stops.csv
         ion_routes_csv: Path to ION_Routes.csv
-        export_arcgis: Export to GeoPackage for visualization
-        export_gmns: Export to GMNS format for AequilibraE import
-        export_aequilibrae: Create AequilibraE project (for traffic assignment merge with road network)
+        export_arcgis: Create GeoPackage from saved data for visualization
+        export_aequilibrae: Create AequilibraE project (for traffic assignment merge)
         verbose: Print progress
     
     Returns:
         nodes_df, links_df
     """
-    # Set defaults
     if bus_gtfs is None:
         bus_gtfs = BUS_GTFS_DIR
     if lrt_gtfs is None:
         lrt_gtfs = LRT_GTFS_DIR
+    
+    data_dir = os.path.join(os.path.dirname(__file__), "data")
+    arcgis_dir = os.path.join(os.path.dirname(__file__), "arcgis_export")
+    gpkg_path = os.path.join(arcgis_dir, "ion_network.gpkg")
     
     if verbose:
         print("\n" + "="*60)
@@ -1104,18 +1391,29 @@ def build_network(
     nodes_df, links_df = build_nodes_and_links(bus_gtfs, lrt_gtfs, ion_stops_csv, ion_routes_csv)
     
     if verbose:
-        print(f"\n=== Save Network ===")
-    out_dir = os.path.join(os.path.dirname(__file__), "data")
-    save_network(nodes_df, links_df, out_dir, verbose=verbose)
+        print(f"\n=== Load route shapes from GTFS ===")
+    link_shapes = {}
+    if bus_gtfs:
+        bus_shapes = build_link_shape_lookup(bus_gtfs, nodes_df, links_df, route_prefix="")
+        link_shapes.update(bus_shapes)
+        if verbose:
+            print(f"  Bus: {len(bus_shapes)} route links with shapes")
+    if lrt_gtfs:
+        lrt_shapes = build_link_shape_lookup(lrt_gtfs, nodes_df, links_df, route_prefix=LRT_ROUTE_PREFIX)
+        link_shapes.update(lrt_shapes)
+        if verbose:
+            print(f"  LRT: {len(lrt_shapes)} route links with shapes")
+
+    # Extension links use straight-line geometry (stop coords only, no GeoJSON)
+
+    if verbose:
+        print(f"\n=== Save node.csv, link.csv, geometry.csv ===")
+    save_network_data(nodes_df, links_df, link_shapes, data_dir, verbose=verbose)
     
-    if export_gmns:
+    if export_arcgis:
         if verbose:
-            print(f"\n=== Export to GMNS (for AequilibraE) ===")
-        gmns_dir = os.path.join(os.path.dirname(__file__), "data", "gmns")
-        node_file, link_file, geometry_file = export_to_gmns(nodes_df, links_df, gmns_dir)
-        if verbose:
-            print(f"  GMNS saved to: {gmns_dir}")
-            print(f"    - node.csv, link.csv, geometry.csv")
+            print(f"\n=== Export to ArcGIS (from saved data) ===")
+        export_to_arcgis_from_data(data_dir, gpkg_path, verbose=verbose)
     
     if export_aequilibrae:
         if verbose:
@@ -1131,13 +1429,6 @@ def build_network(
             verbose=verbose,
         )
     
-    if export_arcgis:
-        if verbose:
-            print(f"\n=== Export to ArcGIS (with route shapes) ===")
-        arcgis_dir = os.path.join(os.path.dirname(__file__), "arcgis_export")
-        gpkg_path = os.path.join(arcgis_dir, "ion_network.gpkg")
-        export_to_arcgis(nodes_df, links_df, gpkg_path, bus_gtfs=bus_gtfs, lrt_gtfs=lrt_gtfs)
-    
     if verbose:
         print("\n" + "="*60)
         print("Multimodal Network Build Complete!")
@@ -1149,7 +1440,7 @@ def build_network(
         print(f"\n  Cost parameters (for shortest path):")
         print(f"    - Fare: ${FARE_CONSTANT:.2f}")
         print(f"    - Value of time: ${VALUE_OF_TIME:.2f}/min")
-        print(f"    - Default waiting time: {WAITING_TIME_DEFAULT:.1f} min")
+        print(f"    - Waiting time: bus={WAITING_TIME_BUS:.1f} min, LRT={WAITING_TIME_LRT:.1f} min (by origin mode)")
     
     return nodes_df, links_df
 
@@ -1161,34 +1452,44 @@ if __name__ == "__main__":
     # Test shortest path and export to GeoPackage
     print("\n=== Testing Shortest Path ===")
     
-    from transit.shortest_path import shortest_path_transit, export_shortest_path_to_arcgis
+    from transit.shortest_path import shortest_path_transit, compute_path_details, export_shortest_path_to_arcgis
     
     # Find sample LRT and bus nodes
     lrt_nodes = nodes_df[nodes_df["mode"] == MODE_LRT]
     bus_nodes = nodes_df[nodes_df["mode"] == MODE_BUS]
     
     if len(lrt_nodes) > 0 and len(bus_nodes) > 0:
-        # Pick a bus node and an LRT node
-        orig_node = int(bus_nodes.iloc[0]["node_id"])
-        dest_node = int(lrt_nodes.iloc[len(lrt_nodes)//2]["node_id"])
+        orig_node = int(1614)
+        dest_node = int(2874)
         
-        print(f"\n  Route: Bus stop -> LRT stop")
-        print(f"  Origin node: {orig_node} (bus)")
-        print(f"  Destination node: {dest_node} (LRT)")
+        print(f"  Finding path from node {orig_node} to node {dest_node}")
+        orig_mode = nodes_df[nodes_df["node_id"] == orig_node]["mode"].iloc[0] if orig_node in nodes_df["node_id"].values else MODE_BUS
+        wait_min = WAITING_TIME_LRT if orig_mode == MODE_LRT else WAITING_TIME_BUS
+        print(f"  Cost parameters: FARE=${FARE_CONSTANT:.2f}, VALUE_OF_TIME=${VALUE_OF_TIME:.2f}/min, Waiting time: {wait_min:.1f} min ({orig_mode})")
         
         result = shortest_path_transit(
             nodes_df, links_df,
             orig_node, dest_node,
             cost="generalized",
             fare=FARE_CONSTANT,
-            waiting_time_min=WAITING_TIME_DEFAULT,
+            waiting_time_min=wait_min,
             value_of_time=VALUE_OF_TIME,
             verbose=True
         )
         
         if result["found"]:
-            print(f"\n  Path found with {len(result['path_nodes'])} nodes")
-            print(f"  Generalized cost: ${result['generalized_cost']:.2f}")
+            print(f"\n  Path found!")
+            print(f"    Nodes in path: {len(result['path_nodes'])}")
+            print(f"    Total time: {result['total_time_min']:.1f} min")
+            print(f"    Total distance: {result['total_length_m']:.0f} m")
+            print(f"    Generalized cost: ${result['generalized_cost']:.2f}")
+            
+            details = compute_path_details(links_df, result["path_links"], nodes_df=nodes_df)
+            print(f"\n  Path Statistics:")
+            print(f"    Total distance: {details['total_length_m']:.0f} m")
+            print(f"    Total travel time: {details['total_travel_time_min']:.1f} min")
+            print(f"    Number of transfers: {details['num_transfers']}")
+            print(f"    Routes used: {details['routes_used']}")
             
             # Build link shapes for proper route geometry in export
             link_shapes = {}
@@ -1196,7 +1497,8 @@ if __name__ == "__main__":
             link_shapes.update(bus_shapes)
             lrt_shapes = build_link_shape_lookup(LRT_GTFS_DIR, nodes_df, links_df, route_prefix=LRT_ROUTE_PREFIX)
             link_shapes.update(lrt_shapes)
-            
+            # Extension links use straight lines (no GeoJSON geometry)
+
             # Export shortest path to GeoPackage with route shapes
             print("\n=== Export Shortest Path to ArcGIS ===")
             arcgis_dir = os.path.join(os.path.dirname(__file__), "arcgis_export")
@@ -1206,5 +1508,7 @@ if __name__ == "__main__":
                 out_dir=arcgis_dir,
                 link_shapes=link_shapes
             )
+        else:
+            print(f"  No path found")
     else:
         print("  Could not find test nodes")

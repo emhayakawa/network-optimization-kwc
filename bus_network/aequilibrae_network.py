@@ -5,7 +5,7 @@ Use this so shortest path and (later) traffic assignment use the same engine.
 import os
 import shutil
 
-from .build_bus_network import build_nodes_and_links, export_to_gmns
+from .build_bus_network import build_nodes_and_links, build_link_shape_lookup, save_network_data
 from .config import DEFAULT_GTFS_PATH
 
 
@@ -82,8 +82,11 @@ def create_aequilibrae_project(
         shutil.rmtree(project_path)
 
     nodes_df, links_df = build_nodes_and_links(DEFAULT_GTFS_PATH)
-    gmns_dir = os.path.join(base_dir, "data", "gmns")
-    node_file, link_file, geometry_file = export_to_gmns(nodes_df, links_df, gmns_dir, srid=srid)
+    link_shapes = build_link_shape_lookup(DEFAULT_GTFS_PATH, nodes_df, links_df)
+    data_dir = os.path.join(base_dir, "data")
+    node_file, link_file, geometry_file = save_network_data(
+        nodes_df, links_df, link_shapes, data_dir, srid=srid, verbose=False
+    )
 
     project = Project()
     project.new(project_path)

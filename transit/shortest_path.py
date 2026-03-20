@@ -26,29 +26,53 @@ DEFAULT_WAITING_TIME = 7.5    # minutes
 DEFAULT_VALUE_OF_TIME = 0.33  # dollars per minute ($20/hour)
 
 
-def _build_adjacency(links_df, cost_field):
+def _get_dest_cluster_nodes(nodes_df, dest_node_id):
+    """Return set of node_ids in the same cluster as dest_node_id. Used to waive transfer cost when arriving at destination cluster."""
+    dest_node_id = int(dest_node_id)
+    if "cluster_id" not in nodes_df.columns:
+        return {dest_node_id}
+    dest_row = nodes_df[nodes_df["node_id"] == dest_node_id]
+    if len(dest_row) == 0:
+        return {dest_node_id}
+    dest_cluster = dest_row["cluster_id"].iloc[0]
+    same_cluster = nodes_df[nodes_df["cluster_id"] == dest_cluster]["node_id"].astype(int).tolist()
+    return set(same_cluster)
+
+
+def _build_adjacency(links_df, cost_field, dest_cluster_nodes=None):
     """Build adjacency list from links DataFrame."""
     adj = {}
+    dest_cluster_nodes = dest_cluster_nodes or set()
     for _, row in links_df.iterrows():
         f, t = int(row["from_node_id"]), int(row["to_node_id"])
-        c = float(row[cost_field])
+        link_type = row.get("link_type", "")
+        if link_type in ("transfer", "multimodal_transfer") and t in dest_cluster_nodes:
+            c = 0.0
+        else:
+            c = float(row[cost_field])
         if f not in adj:
             adj[f] = []
         adj[f].append((t, c))
     return adj
 
 
-def _build_adjacency_generalized(links_df, value_of_time):
+def _build_adjacency_generalized(links_df, value_of_time, dest_cluster_nodes=None):
     """
     Build adjacency list using generalized cost.
     Link cost = travel_time_min × value_of_time
-    (Fare and waiting time added once at trip level, not per link)
+    Transfer/multimodal_transfer links to destination cluster cost 0 (arrival at destination).
     """
     adj = {}
+    dest_cluster_nodes = dest_cluster_nodes or set()
     for _, row in links_df.iterrows():
         f, t = int(row["from_node_id"]), int(row["to_node_id"])
-        travel_time = float(row["travel_time_min"])
-        cost = travel_time * value_of_time
+        link_type = row.get("link_type", "")
+        if link_type in ("transfer", "multimodal_transfer") and t in dest_cluster_nodes:
+            travel_time = 0.0
+            cost = 0.0
+        else:
+            travel_time = float(row["travel_time_min"])
+            cost = travel_time * value_of_time
         if f not in adj:
             adj[f] = []
         adj[f].append((t, cost, travel_time))
@@ -92,16 +116,17 @@ def shortest_path_transit(
     if value_of_time is None:
         value_of_time = DEFAULT_VALUE_OF_TIME
 
+    orig_node_id = int(orig_node_id)
+    dest_node_id = int(dest_node_id)
+    dest_cluster_nodes = _get_dest_cluster_nodes(nodes_df, dest_node_id)
+
     if cost == COST_GENERALIZED:
-        adj = _build_adjacency_generalized(links_df, value_of_time)
+        adj = _build_adjacency_generalized(links_df, value_of_time, dest_cluster_nodes)
         use_generalized = True
     else:
         cost_field = "travel_time_min" if cost == COST_TIME else "length_m"
-        adj = _build_adjacency(links_df, cost_field)
+        adj = _build_adjacency(links_df, cost_field, dest_cluster_nodes)
         use_generalized = False
-
-    orig_node_id = int(orig_node_id)
-    dest_node_id = int(dest_node_id)
 
     dist = {orig_node_id: 0.0}
     pred = {orig_node_id: None}
@@ -163,10 +188,12 @@ def shortest_path_transit(
         try:
             rows = link_lookup.loc[(f, t)]
             row = rows.iloc[0] if isinstance(rows, pd.DataFrame) else rows
-            total_time_min += float(row["travel_time_min"])
-            total_length_m += float(row["length_m"])
-
             link_type = row.get("link_type", "")
+            if link_type in ("transfer", "multimodal_transfer") and t in dest_cluster_nodes:
+                total_time_min += 0.0  # No transfer cost when arriving at destination cluster
+            else:
+                total_time_min += float(row["travel_time_min"])
+            total_length_m += float(row["length_m"])
             mode = row.get("mode", "")
 
             if link_type == "transfer":
@@ -191,6 +218,7 @@ def shortest_path_transit(
         print(f"  In-vehicle time: {total_time_min:.2f} min")
         print(f"  Total distance: {total_length_m:.0f} m ({total_length_m/1000:.2f} km)")
         print(f"  Nodes: {len(path_nodes)}, Links: {len(path_links)}")
+        print(f"  Node sequence (origin -> destination): {path_nodes}")
         print(f"  Transfers: {num_transfers}" + (f" (multimodal: {num_multimodal_transfers})" if num_multimodal_transfers else ""))
         if modes_used:
             print(f"  Modes used: {', '.join(sorted(modes_used))}")
@@ -237,10 +265,11 @@ def compute_generalized_cost(
     return fare + (total_travel_time * value_of_time)
 
 
-def compute_path_details(links_df, path_links):
+def compute_path_details(links_df, path_links, nodes_df=None):
     """
     Compute detailed path statistics.
     Handles both bus (no mode column) and multimodal (mode column) links.
+    When nodes_df provided, transfer links to destination cluster count as 0 time.
     """
     if not path_links:
         return {
@@ -251,6 +280,9 @@ def compute_path_details(links_df, path_links):
             "routes_used": [],
             "segments_by_mode": {"bus": 0, "lrt": 0, "transfer": 0},
         }
+
+    dest_node = path_links[-1][1]  # path ends at destination
+    dest_cluster_nodes = _get_dest_cluster_nodes(nodes_df, dest_node) if nodes_df is not None else set()
 
     link_lookup = links_df.set_index(["from_node_id", "to_node_id"])
     total_length_m = 0.0
@@ -264,10 +296,12 @@ def compute_path_details(links_df, path_links):
         try:
             rows = link_lookup.loc[(f, t)]
             row = rows.iloc[0] if isinstance(rows, pd.DataFrame) else rows
-            total_length_m += float(row["length_m"])
-            total_travel_time_min += float(row["travel_time_min"])
-
             link_type = row.get("link_type", "")
+            if link_type in ("transfer", "multimodal_transfer") and t in dest_cluster_nodes:
+                total_travel_time_min += 0.0
+            else:
+                total_travel_time_min += float(row["travel_time_min"])
+            total_length_m += float(row["length_m"])
             mode = row.get("mode", "")
 
             if "transfer" in link_type:

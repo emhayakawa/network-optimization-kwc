@@ -216,6 +216,7 @@ def build_network(
     traffic_lights_path=None,
     cluster_tolerance_m=None,
     export_arcgis=True,
+    create_aequilibrae=False,
     verbose=True
 ):
     """
@@ -227,6 +228,7 @@ def build_network(
         cluster_tolerance_m: distance to merge nearby nodes (default: NODE_CLUSTER_TOLERANCE_M)
                             Set to 0 to disable clustering
         export_arcgis: export to GeoPackage for visualization
+        create_aequilibrae: create AequilibraE project (default: False; set True for traffic assignment)
         verbose: print progress
     
     Returns:
@@ -306,9 +308,13 @@ def build_network(
         print("\n=== Step 8: Save GMNS ===")
     node_file, link_file, geometry_file = save_gmns(nodes_gdf, edges_gdf)
     
-    if verbose:
-        print("\n=== Step 9: Create AequilibraE project ===")
-    project = create_aequilibrae_project(node_file, link_file, geometry_file)
+    project = None
+    if create_aequilibrae:
+        if verbose:
+            print("\n=== Step 9: Create AequilibraE project ===")
+        project = create_aequilibrae_project(node_file, link_file, geometry_file)
+    elif verbose:
+        print("\n=== Step 9: Skipping AequilibraE project (create_aequilibrae=False) ===")
     
     if export_arcgis:
         if verbose:
@@ -326,8 +332,8 @@ if __name__ == "__main__":
     
     print("\n=== Testing shortest path (NetworkX with generalized cost) ===")
     all_node_ids = list(nodes_gdf['node_id'].values)
-    orig_node = int(1912)#(all_node_ids[0])
-    dest_node = int(2651)#(all_node_ids[min(100, len(all_node_ids) - 1)])
+    orig_node = int(1761)#(all_node_ids[0])
+    dest_node = int(2657)#(all_node_ids[min(100, len(all_node_ids) - 1)])
     # orig_node = int(all_node_ids[0])
     # dest_node = int(all_node_ids[min(100, len(all_node_ids) - 1)])
     
@@ -353,4 +359,5 @@ if __name__ == "__main__":
             result["path_nodes"], result["path_links"]
         )
     
-    project.close()
+    if project is not None:
+        project.close()

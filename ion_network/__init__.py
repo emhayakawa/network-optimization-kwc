@@ -28,9 +28,8 @@ from .build_ion_network import (
     build_lrt_network_component,
     merge_networks,
     build_nodes_and_links,
-    save_network,
+    save_network_data,
     export_to_arcgis,
-    export_to_gmns,
     build_network,
 )
 from .aequilibrae_network import create_aequilibrae_project

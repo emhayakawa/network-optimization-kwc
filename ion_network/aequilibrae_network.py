@@ -5,7 +5,12 @@ Use this so the ION network can be merged with the road network for traffic assi
 import os
 import shutil
 
-from .build_ion_network import build_nodes_and_links, export_to_gmns
+from .build_ion_network import (
+    build_nodes_and_links,
+    build_link_shape_lookup,
+    save_network_data,
+    LRT_ROUTE_PREFIX,
+)
 from .config import BUS_GTFS_DIR, LRT_GTFS_DIR, ION_STOPS_CSV, ION_ROUTES_CSV, PROJECT_CRS
 
 
@@ -113,10 +118,18 @@ def create_aequilibrae_project(
             ion_routes_csv=ion_routes_csv,
         )
 
-    gmns_dir = os.path.join(base_dir, "data", "gmns")
+    data_dir = os.path.join(base_dir, "data")
     if verbose:
-        print("\n=== Exporting to GMNS ===")
-    node_file, link_file, geometry_file = export_to_gmns(nodes_df, links_df, gmns_dir, srid=srid)
+        print("\n=== Exporting to GMNS (node.csv, link.csv, geometry.csv) ===")
+    link_shapes = {}
+    bus_shapes = build_link_shape_lookup(bus_gtfs, nodes_df, links_df, route_prefix="")
+    link_shapes.update(bus_shapes)
+    lrt_shapes = build_link_shape_lookup(lrt_gtfs, nodes_df, links_df, route_prefix=LRT_ROUTE_PREFIX)
+    link_shapes.update(lrt_shapes)
+    # Extension links use straight-line geometry (no GeoJSON)
+    node_file, link_file, geometry_file = save_network_data(
+        nodes_df, links_df, link_shapes, data_dir, srid=srid, verbose=verbose
+    )
 
     project = Project()
     project.new(project_path)

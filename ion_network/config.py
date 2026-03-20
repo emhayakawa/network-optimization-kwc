@@ -16,7 +16,7 @@ _URA_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DATA_DIR = os.path.join(_URA_DIR, "Data")
 
 # LRT GTFS data (ION Light Rail - current operating: Conestoga to Fairway)
-LRT_GTFS_DIR = os.path.join(_DATA_DIR, "GTFS(onlyLRT)")
+LRT_GTFS_DIR = os.path.join(_DATA_DIR, "GTFS(withLRT)")
 
 # Bus GTFS data (GRT bus routes - full transit system)
 BUS_GTFS_DIR = os.path.join(_DATA_DIR, "Raw_GTFS")
@@ -31,17 +31,15 @@ ION_ROUTES_CSV = os.path.join(_DATA_DIR, "ION_Routes.csv")
 
 # Transfer time between same-mode routes (minutes)
 TRANSFER_TIME_BUS = 15.0      # Bus-to-bus transfer (same as bus_network)
-TRANSFER_TIME_LRT = 5.0       # LRT-to-LRT transfer (faster)
 
 # Transfer time between different modes (bus <-> LRT)
 TRANSFER_TIME_BUS_LRT = 8.0   # Bus-to-LRT or LRT-to-bus
 
-# Walking links between nearby stops (improves connectivity)
-WALKING_LINK_MAX_M = 200.0    # max distance (m) to add a walk link
-WALKING_SPEED_M_PER_MIN = 80.0  # ~4.8 km/h
-
 # Stop clustering: nearby stops within this radius are grouped together
-STOP_CLUSTER_RADIUS_M = 100.0  # meters (larger for multimodal transfers)
+# Bus component uses same radius as bus_network (50m) for consistent coordinates
+BUS_CLUSTER_RADIUS_M = 100.0   # meters (match bus_network for identical bus nodes/links)
+# Multimodal transfer: bus-LRT links when stops within this radius
+MULTIMODAL_TRANSFER_RADIUS_M = 100.0  # meters (larger to catch more bus-LRT connections)
 
 # =============================================================================
 # Generalized Cost Parameters for Transit
@@ -63,7 +61,6 @@ TRANSFER_FARE = 0.0       # Free transfers within GRT system
 # LRT: ~5 min average wait (7-8 min headway during peak)
 WAITING_TIME_BUS = 7.5    # Average wait for bus (minutes)
 WAITING_TIME_LRT = 5.0    # Average wait for LRT (minutes)
-WAITING_TIME_DEFAULT = 7.5  # Default for mixed trips
 
 # Value of time (dollars per minute) - same as bus network
 VALUE_OF_TIME = 0.33      # $20/hour

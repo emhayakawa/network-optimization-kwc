@@ -6,12 +6,8 @@ import os
 # Transfer time when changing buses at the same stop (minutes)
 TRANSFER_TIME_MINUTES = 15.0
 
-# Walking links between nearby stops (improves connectivity)
-WALKING_LINK_MAX_M = 200.0  # max straight-line distance (m) to add a walk link
-WALKING_SPEED_M_PER_MIN = 80.0  # ~4.8 km/h; travel_time_min = distance_m / 80
-
 # Stop clustering: nearby stops within this radius are grouped together
-STOP_CLUSTER_RADIUS_M = 50.0  # meters
+STOP_CLUSTER_RADIUS_M = 100.0  # meters
 
 # =============================================================================
 # Generalized Cost Parameters for Transit
