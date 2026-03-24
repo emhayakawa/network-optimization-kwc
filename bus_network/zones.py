@@ -1,209 +1,246 @@
 """
 TAZ (Traffic Analysis Zone) handling for the bus network.
 
-Creates zone centroids as nodes and maps bus stops to their containing zones.
-This simplifies the network by using zone-to-zone routing instead of stop-to-stop.
+Loads TAZ polygons and assigns a zone_id to points or nodes (e.g. bus network nodes at
+cluster lat/lon) via spatial join. No zone centroids are required for routing; use
+``zone_to_zone_routing`` (repo root) for zone-to-zone shortest paths on bus, ION, or road networks.
 """
 import os
+
 import geopandas as gpd
 import pandas as pd
-from shapely.geometry import Point
 
-# Default path to TAZ shapefile (relative to URA folder)
 _URA_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_TAZ_SHAPEFILE = os.path.join(_URA_DIR, "2011 RMOW RTM TAZ_zone/2011 RMOW RTM TAZ_zone.shp")
+_DATA_DIR = os.path.join(_URA_DIR, "Data")
+DEFAULT_TAZ_SHAPEFILE = os.path.join(
+    _DATA_DIR, "2011 RMOW RTM TAZ_zone", "2011 RMOW RTM TAZ_zone.shp"
+)
 
-# CRS for the project
 PROJECT_CRS = "EPSG:26917"
+
+_ZONE_ID_CANDIDATES = [
+    "ID_TAZ",
+    "TAZ",
+    "TAZ_ID",
+    "TAZID",
+    "Zone",
+    "ZONE",
+    "ZoneID",
+    "ID",
+]
 
 
 def load_taz_zones(taz_path=None):
     """
-    Load TAZ zones from shapefile.
-    
-    Parameters:
-        taz_path: path to TAZ shapefile (default: 2011 RMOW RTM TAZ_zone)
-    
+    Load TAZ zones from a shapefile (or other file geopandas.read_file supports).
+
     Returns:
-        GeoDataFrame of TAZ zones with geometry
+        GeoDataFrame in PROJECT_CRS (EPSG:26917).
     """
     path = taz_path or DEFAULT_TAZ_SHAPEFILE
     zones_gdf = gpd.read_file(path)
-    
-    # Ensure correct CRS
+
     if zones_gdf.crs is None:
         zones_gdf = zones_gdf.set_crs(PROJECT_CRS)
     elif zones_gdf.crs != PROJECT_CRS:
         zones_gdf = zones_gdf.to_crs(PROJECT_CRS)
-    
-    print(f"Loaded {len(zones_gdf)} TAZ zones")
+
+    print(f"Loaded {len(zones_gdf)} TAZ zones from {path}")
     print(f"Columns: {zones_gdf.columns.tolist()}")
-    
+
     return zones_gdf
 
 
-def create_zone_centroids(zones_gdf, zone_id_field=None):
-    """
-    Create centroid points for each TAZ zone.
-    
-    Parameters:
-        zones_gdf: GeoDataFrame of TAZ zones
-        zone_id_field: column name for zone ID (auto-detected if None)
-    
-    Returns:
-        GeoDataFrame of centroids with zone_id, geometry (Point)
-    """
-    # Auto-detect zone ID field
-    if zone_id_field is None:
-        # Look for common zone ID field names
-        candidates = ['TAZ', 'TAZ_ID', 'TAZID', 'Zone', 'ZONE', 'ZoneID', 'ID', 'FID']
-        for col in candidates:
-            if col in zones_gdf.columns:
-                zone_id_field = col
-                break
-        if zone_id_field is None:
-            # Use first numeric column or index
-            numeric_cols = zones_gdf.select_dtypes(include=['int64', 'int32', 'float64']).columns
-            if len(numeric_cols) > 0:
-                zone_id_field = numeric_cols[0]
-            else:
-                zones_gdf = zones_gdf.reset_index()
-                zone_id_field = 'index'
-    
-    print(f"Using '{zone_id_field}' as zone ID field")
-    
-    # Compute centroids
-    centroids = zones_gdf.copy()
-    centroids['centroid_geom'] = centroids.geometry.centroid
-    
-    # Create centroid GeoDataFrame
-    centroids_gdf = gpd.GeoDataFrame(
-        {
-            'zone_id': centroids[zone_id_field].astype(int),
-            'x_coord': centroids['centroid_geom'].x,
-            'y_coord': centroids['centroid_geom'].y,
-            'geometry': centroids['centroid_geom'],
-        },
-        crs=zones_gdf.crs
+def detect_zone_id_field(zones_gdf, zone_id_field=None):
+    """Return the attribute column name used as zone identifier."""
+    if zone_id_field is not None:
+        if zone_id_field not in zones_gdf.columns:
+            raise KeyError(f"zone_id_field {zone_id_field!r} not in zones columns")
+        return zone_id_field
+    for col in _ZONE_ID_CANDIDATES:
+        if col in zones_gdf.columns:
+            return col
+    raise ValueError(
+        "Could not detect zone ID column in TAZ layer. "
+        f"Columns: {zones_gdf.columns.tolist()}. Pass zone_id_field=..."
     )
-    
-    # Add original zone area for reference
-    centroids_gdf['zone_area_sqm'] = zones_gdf.geometry.area
-    
-    print(f"Created {len(centroids_gdf)} zone centroids")
-    
-    return centroids_gdf
+
+
+def assign_zone_id_by_location(
+    df,
+    zones_gdf,
+    lat_col="stop_lat",
+    lon_col="stop_lon",
+    zone_id_field=None,
+):
+    """
+    Add zone_id to each row from a point-in-polygon join (EPSG:4326 lon/lat → zones CRS).
+
+    Points outside all polygons are assigned to the nearest zone polygon.
+
+    Parameters:
+        df: DataFrame with lat_col, lon_col in WGS84
+        zones_gdf: TAZ polygons (typically from load_taz_zones)
+        zone_id_field: attribute for zone id; auto-detected if None
+
+    Returns:
+        DataFrame copy with int zone_id column.
+    """
+    zone_id_field = detect_zone_id_field(zones_gdf, zone_id_field)
+    out = df.copy()
+
+    points = gpd.GeoDataFrame(
+        out,
+        geometry=gpd.points_from_xy(out[lon_col], out[lat_col]),
+        crs="EPSG:4326",
+    )
+    points = points.to_crs(zones_gdf.crs)
+
+    joined = gpd.sjoin(
+        points,
+        zones_gdf[[zone_id_field, "geometry"]],
+        how="left",
+        predicate="within",
+    )
+    joined = joined.rename(columns={zone_id_field: "zone_id"})
+
+    # Overlapping TAZ polygons can match the same point more than once; keep one row per input.
+    if joined.index.duplicated().any():
+        n_before = len(joined)
+        prefer = joined.assign(_z=joined["zone_id"].notna()).sort_values(
+            "_z", ascending=False
+        )
+        joined = prefer[~prefer.index.duplicated(keep="first")].drop(columns=["_z"])
+        if n_before > len(joined):
+            print(
+                f"  {n_before - len(joined)} duplicate TAZ matches dropped "
+                f"(overlapping polygons; kept one zone per point)"
+            )
+
+    unassigned = joined["zone_id"].isna()
+    if unassigned.any():
+        print(
+            f"  {unassigned.sum()} points outside TAZ boundaries — assigning nearest zone"
+        )
+        for idx in joined[unassigned].index:
+            g = joined.loc[idx, "geometry"]
+            distances = zones_gdf.geometry.distance(g)
+            nearest_idx = distances.idxmin()
+            joined.loc[idx, "zone_id"] = zones_gdf.loc[nearest_idx, zone_id_field]
+
+    if "index_right" in joined.columns:
+        joined = joined.drop(columns=["index_right"])
+
+    joined = joined.drop(columns=["geometry"])
+    joined["zone_id"] = joined["zone_id"].astype(int)
+    print(
+        f"Assigned {len(joined)} locations to {joined['zone_id'].nunique()} zones"
+    )
+    return joined
+
+
+def assign_zone_id_to_point_geodataframe(gdf, zones_gdf, zone_id_field=None):
+    """
+    Add zone_id to a GeoDataFrame of points (any CRS). Uses WGS84 coordinates for the TAZ join.
+
+    Typical use: road network nodes after build (geometry in EPSG:26917).
+    """
+    if gdf.crs is None:
+        raise ValueError("GeoDataFrame must have a CRS set")
+    wgs = gdf.to_crs("EPSG:4326")
+    tmp = pd.DataFrame(index=gdf.index)
+    tmp["stop_lon"] = wgs.geometry.x.values
+    tmp["stop_lat"] = wgs.geometry.y.values
+    assigned = assign_zone_id_by_location(tmp, zones_gdf, zone_id_field=zone_id_field)
+    out = gdf.copy()
+    out["zone_id"] = assigned.loc[gdf.index, "zone_id"].values
+    return out
 
 
 def assign_stops_to_zones(stops_gdf, zones_gdf, zone_id_field=None):
     """
-    Assign each bus stop to its containing TAZ zone.
-    
-    Parameters:
-        stops_gdf: GeoDataFrame of bus stops (must have geometry)
-        zones_gdf: GeoDataFrame of TAZ zones
-        zone_id_field: column name for zone ID in zones_gdf
-    
+    Assign each bus stop (GeoDataFrame with geometry) to a TAZ zone.
+
     Returns:
-        stops_gdf with added 'zone_id' column
+        GeoDataFrame with zone_id column.
     """
-    # Auto-detect zone ID field if not provided
-    if zone_id_field is None:
-        candidates = ['TAZ', 'TAZ_ID', 'TAZID', 'Zone', 'ZONE', 'ZoneID', 'ID']
-        for col in candidates:
-            if col in zones_gdf.columns:
-                zone_id_field = col
-                break
-    
-    # Ensure same CRS
+    zone_id_field = detect_zone_id_field(zones_gdf, zone_id_field)
+
     if stops_gdf.crs != zones_gdf.crs:
         stops_gdf = stops_gdf.to_crs(zones_gdf.crs)
-    
-    # Spatial join to find containing zone
+
     stops_with_zones = gpd.sjoin(
         stops_gdf,
-        zones_gdf[[zone_id_field, 'geometry']],
-        how='left',
-        predicate='within'
+        zones_gdf[[zone_id_field, "geometry"]],
+        how="left",
+        predicate="within",
     )
-    
-    # Rename zone ID column
-    stops_with_zones = stops_with_zones.rename(columns={zone_id_field: 'zone_id'})
-    
-    # Handle stops outside all zones (assign to nearest zone)
-    unassigned = stops_with_zones['zone_id'].isna()
+    stops_with_zones = stops_with_zones.rename(columns={zone_id_field: "zone_id"})
+
+    if stops_with_zones.index.duplicated().any():
+        prefer = stops_with_zones.assign(
+            _z=stops_with_zones["zone_id"].notna()
+        ).sort_values("_z", ascending=False)
+        stops_with_zones = prefer[
+            ~prefer.index.duplicated(keep="first")
+        ].drop(columns=["_z"])
+
+    unassigned = stops_with_zones["zone_id"].isna()
     if unassigned.any():
-        print(f"  {unassigned.sum()} stops outside TAZ boundaries - assigning to nearest zone")
+        print(
+            f"  {unassigned.sum()} stops outside TAZ boundaries — assigning nearest zone"
+        )
         for idx in stops_with_zones[unassigned].index:
-            stop_geom = stops_with_zones.loc[idx, 'geometry']
+            stop_geom = stops_with_zones.loc[idx, "geometry"]
             distances = zones_gdf.geometry.distance(stop_geom)
             nearest_idx = distances.idxmin()
-            stops_with_zones.loc[idx, 'zone_id'] = zones_gdf.loc[nearest_idx, zone_id_field]
-    
-    # Clean up sjoin columns
-    if 'index_right' in stops_with_zones.columns:
-        stops_with_zones = stops_with_zones.drop(columns=['index_right'])
-    
-    stops_with_zones['zone_id'] = stops_with_zones['zone_id'].astype(int)
-    
-    assigned_zones = stops_with_zones['zone_id'].nunique()
-    print(f"Assigned {len(stops_with_zones)} stops to {assigned_zones} zones")
-    
+            stops_with_zones.loc[idx, "zone_id"] = zones_gdf.loc[
+                nearest_idx, zone_id_field
+            ]
+
+    if "index_right" in stops_with_zones.columns:
+        stops_with_zones = stops_with_zones.drop(columns=["index_right"])
+
+    stops_with_zones["zone_id"] = stops_with_zones["zone_id"].astype(int)
+    print(
+        f"Assigned {len(stops_with_zones)} stops to "
+        f"{stops_with_zones['zone_id'].nunique()} zones"
+    )
     return stops_with_zones
 
 
 def get_zone_stop_counts(stops_with_zones):
-    """
-    Get count of stops per zone.
-    
-    Returns:
-        DataFrame with zone_id and stop_count
-    """
-    counts = stops_with_zones.groupby('zone_id').size().reset_index(name='stop_count')
-    return counts
+    """DataFrame: zone_id, stop_count."""
+    return stops_with_zones.groupby("zone_id").size().reset_index(name="stop_count")
 
 
-def export_zones_to_gis(zones_gdf, centroids_gdf, output_path):
+def export_zones_to_gis(zones_gdf, output_path, centroids_gdf=None):
     """
-    Export zones and centroids to GeoPackage for visualization.
-    
-    Parameters:
-        zones_gdf: GeoDataFrame of TAZ polygons
-        centroids_gdf: GeoDataFrame of zone centroids
-        output_path: path to output .gpkg file
+    Export **TAZ polygon boundaries** to a GeoPackage (layer ``zones``, WGS84), not transit/road nodes.
+
+    The ``zone_id`` attribute on network nodes comes from ``build_bus_network`` / ``build_ion_network`` /
+    ``build_road_network``, which write the ``nodes`` layer in each network's ``arcgis_export/*.gpkg``
+    (from ``node.csv`` / node GeoDataFrame). Use this helper only if you want a standalone TAZ map.
     """
-    import os
-    
-    # Ensure output directory exists
-    os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
-    
-    # Remove existing file
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     if os.path.exists(output_path):
         os.remove(output_path)
-    
-    # Export to WGS84 for ArcGIS
+
     zones_wgs = zones_gdf.to_crs("EPSG:4326")
-    centroids_wgs = centroids_gdf.to_crs("EPSG:4326")
-    
     zones_wgs.to_file(output_path, layer="zones", driver="GPKG")
-    centroids_wgs.to_file(output_path, layer="centroids", driver="GPKG", mode="a")
-    
+
+    if centroids_gdf is not None and len(centroids_gdf):
+        centroids_wgs = centroids_gdf.to_crs("EPSG:4326")
+        centroids_wgs.to_file(output_path, layer="centroids", driver="GPKG", mode="a")
+        print(f"  - Layer 'centroids': {len(centroids_gdf)} points")
+
     print(f"Exported zones to: {output_path}")
     print(f"  - Layer 'zones': {len(zones_gdf)} TAZ polygons")
-    print(f"  - Layer 'centroids': {len(centroids_gdf)} zone centroids")
 
 
 if __name__ == "__main__":
-    # Test zone loading and centroid creation
     print("=== Loading TAZ Zones ===")
-    zones_gdf = load_taz_zones()
-    
-    print("\n=== Creating Zone Centroids ===")
-    centroids_gdf = create_zone_centroids(zones_gdf)
-    
-    print("\n=== Zone Centroid Sample ===")
-    print(centroids_gdf.head(10))
-    
-    print("\n=== Exporting to GeoPackage ===")
+    z = load_taz_zones()
     export_path = os.path.join(_URA_DIR, "bus_network/arcgis_export/taz_zones.gpkg")
-    export_zones_to_gis(zones_gdf, centroids_gdf, export_path)
+    print("\n=== Exporting polygons only (no centroids) ===")
+    export_zones_to_gis(z, export_path)

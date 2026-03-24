@@ -748,10 +748,20 @@ def merge_networks(bus_nodes, bus_links, lrt_nodes, lrt_links):
     return combined_nodes, combined_links
 
 
-def build_nodes_and_links(bus_gtfs=None, lrt_gtfs=None, ion_stops_csv=None, ion_routes_csv=None):
+def build_nodes_and_links(
+    bus_gtfs=None,
+    lrt_gtfs=None,
+    ion_stops_csv=None,
+    ion_routes_csv=None,
+    taz_path=None,
+    assign_zone_id=True,
+):
     """
     Build complete multimodal network (bus + LRT) nodes and links.
-    
+
+    When assign_zone_id is True and the TAZ shapefile exists, every node gets zone_id from
+    (stop_lat, stop_lon) via point-in-polygon (same as bus_network).
+
     Returns:
         nodes_df, links_df
     """
@@ -763,7 +773,22 @@ def build_nodes_and_links(bus_gtfs=None, lrt_gtfs=None, ion_stops_csv=None, ion_
     
     print("\n=== Merging into Multimodal Network ===")
     nodes_df, links_df = merge_networks(bus_nodes, bus_links, lrt_nodes, lrt_links)
-    
+
+    if assign_zone_id:
+        from bus_network.config import DEFAULT_TAZ_SHAPEFILE
+        from bus_network.zones import assign_zone_id_by_location, load_taz_zones
+
+        taz_file = taz_path or DEFAULT_TAZ_SHAPEFILE
+        if os.path.isfile(taz_file):
+            zones_gdf = load_taz_zones(taz_file)
+            nodes_df = assign_zone_id_by_location(
+                nodes_df, zones_gdf, lat_col="stop_lat", lon_col="stop_lon"
+            )
+        else:
+            print(
+                f"  TAZ file not found ({taz_file}); skipping zone_id on ION network nodes"
+            )
+
     return nodes_df, links_df
 
 
@@ -799,7 +824,19 @@ def save_network_data(nodes_df, links_df, link_shapes, out_dir, srid=26917, verb
     
     node_file = os.path.join(out_dir, "node.csv")
     node_cols = ["node_id", "x_coord", "y_coord"]
-    extra = [c for c in ["stop_id", "route_id", "stop_lat", "stop_lon", "cluster_id", "mode"] if c in gdf_nodes.columns]
+    extra = [
+        c
+        for c in [
+            "stop_id",
+            "route_id",
+            "stop_lat",
+            "stop_lon",
+            "cluster_id",
+            "zone_id",
+            "mode",
+        ]
+        if c in gdf_nodes.columns
+    ]
     gdf_nodes[node_cols + extra].to_csv(node_file, index=False)
     
     # Links: match links.csv schema (link_id, from_node_id, to_node_id, link_type, route_id, travel_time_min, length_m, mode)
@@ -862,7 +899,10 @@ def save_network_data(nodes_df, links_df, link_shapes, out_dir, srid=26917, verb
 
 
 def export_to_arcgis_from_data(data_dir, gpkg_path, verbose=True):
-    """Create ArcGIS GeoPackage from saved node.csv, link.csv, geometry.csv."""
+    """
+    Create ArcGIS GeoPackage from saved node.csv, link.csv, geometry.csv.
+    Columns in node.csv (e.g. zone_id) are carried into the nodes layer.
+    """
     from shapely import wkt
 
     node_file = os.path.join(data_dir, "node.csv")
@@ -1349,9 +1389,11 @@ def build_network(
     lrt_gtfs=None,
     ion_stops_csv=None,
     ion_routes_csv=None,
+    taz_path=None,
+    assign_zone_id=True,
     export_arcgis=True,
     export_aequilibrae=False,
-    verbose=True
+    verbose=True,
 ):
     """
     Main workflow: build the multimodal ION network (bus + LRT).
@@ -1364,6 +1406,8 @@ def build_network(
         lrt_gtfs: Path to LRT GTFS directory (default: GTFS(onlyLRT))
         ion_stops_csv: Path to ION_Stops.csv
         ion_routes_csv: Path to ION_Routes.csv
+        taz_path: TAZ polygons for zone_id on nodes (default: same as bus_network)
+        assign_zone_id: attach zone_id to each node when the TAZ file exists
         export_arcgis: Create GeoPackage from saved data for visualization
         export_aequilibrae: Create AequilibraE project (for traffic assignment merge)
         verbose: Print progress
@@ -1388,7 +1432,14 @@ def build_network(
         print("  - Route shapes from GTFS shapes.txt")
         print("="*60)
     
-    nodes_df, links_df = build_nodes_and_links(bus_gtfs, lrt_gtfs, ion_stops_csv, ion_routes_csv)
+    nodes_df, links_df = build_nodes_and_links(
+        bus_gtfs,
+        lrt_gtfs,
+        ion_stops_csv,
+        ion_routes_csv,
+        taz_path=taz_path,
+        assign_zone_id=assign_zone_id,
+    )
     
     if verbose:
         print(f"\n=== Load route shapes from GTFS ===")

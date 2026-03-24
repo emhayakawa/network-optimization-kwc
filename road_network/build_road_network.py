@@ -122,9 +122,11 @@ def save_gmns(nodes_gdf, edges_gdf, gmns_dir=None):
     nodes_export = nodes_gdf.copy()
     nodes_export['node_id'] = nodes_export['node_id'].astype(int)
     nodes_export['signalized'] = nodes_export['signalized'].astype(int)
-    export_cols = ['node_id', 'x_coord', 'y_coord', 'signalized']
-    if 'merged_count' in nodes_export.columns:
-        export_cols.append('merged_count')
+    export_cols = ["node_id", "x_coord", "y_coord", "signalized"]
+    if "merged_count" in nodes_export.columns:
+        export_cols.append("merged_count")
+    if "zone_id" in nodes_export.columns:
+        export_cols.append("zone_id")
     nodes_export[export_cols].to_csv(node_file, index=False)
     
     # Links: include speed, travel_time, and generalized_cost
@@ -215,9 +217,11 @@ def build_network(
     roads_path=None,
     traffic_lights_path=None,
     cluster_tolerance_m=None,
+    taz_path=None,
+    assign_zone_id=True,
     export_arcgis=True,
     create_aequilibrae=False,
-    verbose=True
+    verbose=True,
 ):
     """
     Main workflow: build the road network with signalized intersections.
@@ -227,6 +231,8 @@ def build_network(
         traffic_lights_path: path to traffic lights shapefile (default: from config)
         cluster_tolerance_m: distance to merge nearby nodes (default: NODE_CLUSTER_TOLERANCE_M)
                             Set to 0 to disable clustering
+        taz_path: TAZ polygons for zone_id on nodes (default: same path as bus_network)
+        assign_zone_id: when True and taz_path exists, add zone_id from point-in-polygon join
         export_arcgis: export to GeoPackage for visualization
         create_aequilibrae: create AequilibraE project (default: False; set True for traffic assignment)
         verbose: print progress
@@ -291,6 +297,21 @@ def build_network(
     if verbose:
         print("\n=== Step 6: Filter to main component ===")
     nodes_gdf, edges_gdf = filter_to_main_component(nodes_gdf, edges_gdf, verbose=verbose)
+
+    if assign_zone_id:
+        from bus_network.config import DEFAULT_TAZ_SHAPEFILE
+        from bus_network.zones import assign_zone_id_to_point_geodataframe, load_taz_zones
+
+        taz_file = taz_path or DEFAULT_TAZ_SHAPEFILE
+        if verbose:
+            print("\n=== Step 6b: TAZ zone_id on road nodes ===")
+        if os.path.isfile(taz_file):
+            zones_gdf = load_taz_zones(taz_file)
+            nodes_gdf = assign_zone_id_to_point_geodataframe(nodes_gdf, zones_gdf)
+        elif verbose:
+            print(
+                f"  TAZ file not found ({taz_file}); skipping zone_id on road nodes"
+            )
     
     if verbose:
         print("\n=== Step 7: Compute generalized cost ===")
