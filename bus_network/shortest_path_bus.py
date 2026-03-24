@@ -23,6 +23,11 @@ from transit.shortest_path import (
     DEFAULT_WAITING_TIME,
     DEFAULT_VALUE_OF_TIME,
 )
+from zone_to_zone_routing import (
+    node_ids_in_zone,
+    shortest_path_transit_zone_to_zone,
+    shortest_path_zone_to_zone,
+)
 
 # Backward compatibility alias
 shortest_path_bus = shortest_path_transit

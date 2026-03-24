@@ -25,21 +25,25 @@ if __name__ == "__main__":
     from config import (
         TRANSFER_TIME_MINUTES,
         DEFAULT_GTFS_PATH,
+        DEFAULT_TAZ_SHAPEFILE,
         STOP_CLUSTER_RADIUS_M,
         FARE_CONSTANT,
         VALUE_OF_TIME,
         WAITING_TIME_MINUTES,
     )
+    from zones import load_taz_zones, assign_zone_id_by_location
     from transit.shortest_path import shortest_path_transit, compute_path_details, export_shortest_path_to_arcgis
 else:
     from .config import (
         TRANSFER_TIME_MINUTES,
         DEFAULT_GTFS_PATH,
+        DEFAULT_TAZ_SHAPEFILE,
         STOP_CLUSTER_RADIUS_M,
         FARE_CONSTANT,
         VALUE_OF_TIME,
         WAITING_TIME_MINUTES,
     )
+    from .zones import load_taz_zones, assign_zone_id_by_location
     from transit.shortest_path import shortest_path_transit, compute_path_details, export_shortest_path_to_arcgis
 
 
@@ -144,7 +148,7 @@ def cluster_nearby_stops(stops_df, cluster_radius_m=None):
     return stops
 
 
-def build_nodes_and_links(gtfs_path=None):
+def build_nodes_and_links(gtfs_path=None, taz_path=None, assign_zone_id=True):
     """
     Build bus network nodes and links from GTFS.
 
@@ -155,8 +159,11 @@ def build_nodes_and_links(gtfs_path=None):
       - Transfers: (stop, route_a) -> (stop, route_b) with travel_time_min = transfer_minutes, length_m = 0.
                    Also includes transfers between stops in the same cluster (nearby stops).
 
+    If assign_zone_id is True and the TAZ file exists, each node gets zone_id from a point-in-polygon
+    join at (stop_lat, stop_lon) (cluster coordinates).
+
     Returns:
-      nodes_df: columns [node_id, stop_id, route_id, stop_lat, stop_lon, cluster_id]
+      nodes_df: columns [node_id, stop_id, route_id, stop_lat, stop_lon, cluster_id] and zone_id if assigned
       links_df: columns [link_id, from_node_id, to_node_id, link_type, travel_time_min, length_m]
     """
     transfer_minutes = TRANSFER_TIME_MINUTES
@@ -317,9 +324,25 @@ def build_nodes_and_links(gtfs_path=None):
 
     # Concatenate route + transfer links
     links_df = pd.concat([route_links_df, transfer_links_df], ignore_index=True)
-    
+
+    if assign_zone_id:
+        taz_file = taz_path or DEFAULT_TAZ_SHAPEFILE
+        if os.path.isfile(taz_file):
+            zones_gdf = load_taz_zones(taz_file)
+            nodes_df = assign_zone_id_by_location(
+                nodes_df, zones_gdf, lat_col="stop_lat", lon_col="stop_lon"
+            )
+        else:
+            print(
+                f"  TAZ layer not found ({taz_file}); "
+                "skipping zone_id (set taz_path= or place shapefile under Data/...)"
+            )
+
     # Clean up nodes_df columns for output
-    nodes_df = nodes_df[["node_id", "stop_id", "route_id", "stop_lat", "stop_lon", "cluster_id"]]
+    node_out_cols = ["node_id", "stop_id", "route_id", "stop_lat", "stop_lon", "cluster_id"]
+    if "zone_id" in nodes_df.columns:
+        node_out_cols.append("zone_id")
+    nodes_df = nodes_df[node_out_cols]
     
     # Diagnostic: check for disconnected nodes
     all_node_ids = set(nodes_df["node_id"].astype(int))
@@ -376,7 +399,19 @@ def save_network_data(nodes_df, links_df, link_shapes, out_dir, srid=26917, verb
     
     node_file = os.path.join(out_dir, "node.csv")
     node_cols = ["node_id", "x_coord", "y_coord"]
-    extra = [c for c in ["stop_id", "route_id", "stop_lat", "stop_lon", "cluster_id", "mode"] if c in gdf_nodes.columns]
+    extra = [
+        c
+        for c in [
+            "stop_id",
+            "route_id",
+            "stop_lat",
+            "stop_lon",
+            "cluster_id",
+            "zone_id",
+            "mode",
+        ]
+        if c in gdf_nodes.columns
+    ]
     gdf_nodes[node_cols + extra].to_csv(node_file, index=False)
     
     # Links: match links.csv schema (link_id, from_node_id, to_node_id, link_type, route_id, travel_time_min, length_m)
@@ -444,6 +479,10 @@ def export_to_arcgis_from_data(data_dir, gpkg_path, verbose=True):
     """
     Create ArcGIS GeoPackage from saved node.csv, link.csv, geometry.csv.
     Transforms from project CRS to WGS84 for visualization.
+
+    All columns present in ``node.csv`` (including ``zone_id`` when TAZ assignment ran) are
+    written to the ``nodes`` layer — this is separate from ``bus_network/zones.export_zones_to_gis``,
+    which only exports TAZ polygon boundaries for mapping.
     """
     import geopandas as gpd
     from shapely import wkt
@@ -715,8 +754,10 @@ def export_to_gmns(nodes_df, links_df, out_dir, link_shapes=None, srid=26917):
 
 def build_network(
     gtfs_path=None,
+    taz_path=None,
+    assign_zone_id=True,
     export_arcgis=True,
-    verbose=True
+    verbose=True,
 ):
     """
     Main workflow: build the bus network from GTFS.
@@ -726,6 +767,8 @@ def build_network(
     
     Parameters:
         gtfs_path: path to GTFS directory (default: Data/Raw_GTFS)
+        taz_path: path to TAZ layer for zone_id on nodes (default: Data/.../2011 RMOW RTM TAZ_zone.shp)
+        assign_zone_id: if True and taz_path exists, add zone_id to each node
         export_arcgis: create GeoPackage from saved data for visualization
         verbose: print progress
     
@@ -745,7 +788,9 @@ def build_network(
     
     if verbose:
         print("\n=== Step 2: Build bus network nodes and links ===")
-    nodes_df, links_df = build_nodes_and_links(gtfs_path)
+    nodes_df, links_df = build_nodes_and_links(
+        gtfs_path, taz_path=taz_path, assign_zone_id=assign_zone_id
+    )
     
     if verbose:
         print(f"\n  Network built: {len(nodes_df)} nodes, {len(links_df)} links")

@@ -32,3 +32,8 @@ _URA_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DATA_DIR = os.path.join(_URA_DIR, "Data")
 # Raw_GTFS directory (same as ion_network bus data)
 DEFAULT_GTFS_PATH = os.path.join(_DATA_DIR, "Raw_GTFS")
+
+# TAZ polygons for assigning zone_id to bus nodes (spatial join at node coordinates)
+DEFAULT_TAZ_SHAPEFILE = os.path.join(
+    _DATA_DIR, "2011 RMOW RTM TAZ_zone", "2011 RMOW RTM TAZ_zone.shp"
+)
