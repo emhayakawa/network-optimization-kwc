@@ -48,6 +48,26 @@ SNAP_TOLERANCE_M = 30  # traffic lights within this distance of intersection sna
 SIGNAL_DELAY_SECONDS = 40  # average wait time at signalized intersection
 
 # ============================================================================
+# Link capacity for traffic assignment (BPR / TAP in AequilibraE)
+# ============================================================================
+# Values = vehicles per lane per hour (vphpl). Total capacity on each directed
+# link = vphpl * max(1, NumberofLa). Map keys are lowercased CartoClass strings.
+#
+# Reference (typical planning values — adjust to your agency standards):
+#   Freeway 2000, Principal arterial 800, Secondary arterial 600,
+#   Collector/local 550, Ramps 600.
+CAPACITY_VPHPL_BY_CARTO_CLASS = {
+    "freeway": 2000,
+    "highway": 2000,       # treat like freeway-class if your shapefile uses "Highway"
+    "arterial": 800,       # principal arterial; use 600 if your "Arterial" is secondary
+    "ramp": 600,
+    "collector": 550,
+    "localstreet": 550,
+    "local": 550,
+}
+DEFAULT_CAPACITY_VPHPL = 600  # fallback when CartoClass is missing or unknown
+
+# ============================================================================
 # Generalized Cost Function Parameters
 # ============================================================================
 # Generalized Cost = (distance_km * COST_PER_KM) + (travel_time_hours * VALUE_OF_TIME)

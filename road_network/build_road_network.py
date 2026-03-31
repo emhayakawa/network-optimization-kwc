@@ -74,11 +74,27 @@ def load_and_clean_roads(roads_path=None):
     return roads_filtered
 
 
+def ensure_capacity_ba_numeric(project):
+    """GMNS sets ``capacity_ba`` to '' for one-way links; coerce to 0 so the column stays numeric for ``build_graphs``."""
+    with project.db_connection_spatial as db:
+        db.execute(
+            "UPDATE links SET capacity_ba = 0 WHERE capacity_ba = '' "
+            "OR (typeof(capacity_ba) = 'text' AND trim(capacity_ba) = '')"
+        )
+        db.commit()
+
+
 def fill_aequilibrae_ba_columns(project):
-    """Fill empty _ab/_ba columns with 0 so build_graphs() works."""
+    """Fill empty _ab/_ba columns with 0 so build_graphs() works.
+
+    Do not zero-fill ``travel_time_ab`` / ``travel_time_ba``: those are filled from
+    ``travel_time_min`` in :func:`apply_travel_time_min_to_directional_fields`. Zero
+    travel times break TAP's ``set_time_field`` check on the paired ``travel_time``
+    column.
+    """
     direction_columns = (
         "lanes_ab", "lanes_ba", "speed_ab", "speed_ba",
-        "capacity_ab", "capacity_ba", "travel_time_ab", "travel_time_ba",
+        "capacity_ab", "capacity_ba",
     )
     links_data = project.network.links.data
     to_fill = [c for c in direction_columns if c in links_data.columns]
@@ -103,6 +119,39 @@ def fill_aequilibrae_ba_columns(project):
                 conn.commit()
     except Exception:
         pass
+
+
+def apply_travel_time_min_to_directional_fields(project, link_csv_path):
+    """
+    Copy GMNS ``travel_time_min`` (minutes) into ``travel_time_ab`` / ``travel_time_ba``.
+
+    AequilibraE's GMNS importer does **not** map ``travel_time_min`` onto those columns;
+    empty values then get zero-filled elsewhere, so the graph's merged ``travel_time``
+    field can contain zeros and :class:`TrafficAssignment` rejects the time field.
+    """
+    df = pd.read_csv(link_csv_path, usecols=["link_id", "travel_time_min"])
+    with project.db_connection_spatial as db:
+        for lid, tt in zip(df["link_id"], df["travel_time_min"]):
+            lid = int(lid)
+            if pd.isna(tt) or float(tt) <= 0:
+                continue
+            tt = float(tt)
+            r = db.execute(
+                "SELECT direction FROM links WHERE link_id = ?", (lid,)
+            ).fetchone()
+            if r is None:
+                continue
+            direction = int(r[0])
+            db.execute(
+                "UPDATE links SET travel_time_ab = ? WHERE link_id = ?",
+                (tt, lid),
+            )
+            if direction == 0:
+                db.execute(
+                    "UPDATE links SET travel_time_ba = ? WHERE link_id = ?",
+                    (tt, lid),
+                )
+        db.commit()
 
 
 def save_gmns(nodes_gdf, edges_gdf, gmns_dir=None):
@@ -137,11 +186,14 @@ def save_gmns(nodes_gdf, edges_gdf, gmns_dir=None):
     links_export['directed'] = links_export['directed'].astype(int)
     links_export['geometry_id'] = links_export['link_id']
     links_export['lanes'] = links_export['lanes'].fillna(1).astype(int)
-    
+    # Default GMNS equivalency maps internal "speed" to column ``free_speed`` (see parameters.yml).
+    if "speed_kmh" in links_export.columns:
+        links_export["free_speed"] = links_export["speed_kmh"]
+
     # Include all cost-related columns
     link_columns = ['link_id', 'from_node_id', 'to_node_id', 'directed', 'length',
-                    'geometry_id', 'allowed_uses', 'lanes', 'speed_kmh', 
-                    'travel_time_min', 'generalized_cost']
+                    'geometry_id', 'allowed_uses', 'lanes', 'speed_kmh', 'free_speed',
+                    'capacity', 'travel_time_min', 'generalized_cost']
     link_columns = [c for c in link_columns if c in links_export.columns]
     links_export[link_columns].to_csv(link_file, index=False)
     
@@ -172,8 +224,10 @@ def create_aequilibrae_project(node_file, link_file, geometry_file, project_dir=
         geometry_path=geometry_file,
         srid=srid
     )
-    
+
+    ensure_capacity_ba_numeric(project)
     fill_aequilibrae_ba_columns(project)
+    apply_travel_time_min_to_directional_fields(project, link_file)
     project.network.build_graphs()
     
     print(f"Network built: {project.network.count_nodes()} nodes, {project.network.count_links()} links")

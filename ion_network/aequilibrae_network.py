@@ -13,6 +13,86 @@ from .build_ion_network import (
 )
 from .config import BUS_GTFS_DIR, LRT_GTFS_DIR, ION_STOPS_CSV, ION_ROUTES_CSV, PROJECT_CRS
 
+# Placeholder capacity (veh/h per direction) for transit line graphs until headway-based capacity is modeled.
+ION_DEFAULT_CAPACITY_VPH = 600
+
+
+def _ensure_gmns_link_allowed_uses(link_file: str, *, verbose: bool = True) -> None:
+    """
+    Patch link.csv so AequilibraE GMNS import matches default equivalency and schema quirks:
+
+    * ``allowed_uses`` — equivalency maps internal modes → this column (not ``modes``).
+    * ``lanes`` — import always writes lanes_ab/lanes_ba; SQLite columns exist only if ``lanes`` is present.
+    """
+    import pandas as pd
+
+    df = pd.read_csv(link_file)
+    msgs = []
+    if "allowed_uses" not in df.columns:
+        if "modes" in df.columns:
+            m = df["modes"].astype(str).str.strip()
+            ok = (m != "") & (m.str.lower() != "nan")
+            df["allowed_uses"] = m.where(ok, "transit")
+        else:
+            df["allowed_uses"] = "transit"
+        msgs.append("allowed_uses")
+    if "lanes" not in df.columns:
+        df["lanes"] = 1
+        msgs.append("lanes (default 1)")
+    if msgs and verbose:
+        print(f"  Added GMNS columns for AequilibraE: {', '.join(msgs)}.")
+    if msgs:
+        df.to_csv(link_file, index=False)
+
+
+def _ion_apply_default_capacity_and_tap_fields(project, *, capacity: float = ION_DEFAULT_CAPACITY_VPH, verbose: bool = True):
+    """
+    After GMNS import + null-filling, set directional capacity for BPR and mirror travel times so TAP can run.
+    Also add ``travel_time_min`` when missing so ``suggest_cost_and_capacity_fields`` picks a time column.
+    """
+    conn = getattr(project, "conn", None) or getattr(project, "db_connection", None)
+    if conn is None:
+        return
+
+    def _run(db):
+        for col in ("capacity_ab", "capacity_ba"):
+            try:
+                db.execute(
+                    f"UPDATE links SET {col} = ? WHERE {col} IS NULL OR {col} = '' OR {col} = 0",
+                    (float(capacity),),
+                )
+            except Exception:
+                pass
+        try:
+            db.execute(
+                "UPDATE links SET travel_time_ba = travel_time_ab "
+                "WHERE travel_time_ba IS NULL OR travel_time_ba = '' OR travel_time_ba = 0"
+            )
+        except Exception:
+            pass
+        try:
+            db.execute("ALTER TABLE links ADD COLUMN travel_time_min NUMERIC")
+        except Exception:
+            pass
+        try:
+            db.execute("UPDATE links SET travel_time_min = travel_time_ab WHERE travel_time_min IS NULL OR travel_time_min = ''")
+        except Exception:
+            pass
+        if hasattr(db, "commit"):
+            db.commit()
+
+    try:
+        if hasattr(conn, "__enter__"):
+            with conn as db:
+                _run(db)
+        else:
+            _run(conn)
+        if verbose:
+            print(f"  ION TAP defaults: capacity_ab/ba={capacity} where missing/zero; travel_time_min/ba aligned.")
+    except Exception as e:
+        if verbose:
+            print(f"  Warning: ION TAP link defaults: {e}")
+
 
 def _fill_aequilibrae_ba_columns(project, direction_columns=None):
     """Fill NULL _ab/_ba columns with 0 so build_graphs does not fail."""
@@ -138,6 +218,7 @@ def create_aequilibrae_project(
 
     if verbose:
         print("Importing network from GMNS...")
+    _ensure_gmns_link_allowed_uses(link_file, verbose=verbose)
     project.network.create_from_gmns(
         link_file_path=link_file,
         node_file_path=node_file,
@@ -182,6 +263,7 @@ def create_aequilibrae_project(
                 print(f"  Warning: could not set travel times: {e}")
 
     _fill_aequilibrae_ba_columns(project)
+    _ion_apply_default_capacity_and_tap_fields(project, capacity=ION_DEFAULT_CAPACITY_VPH, verbose=verbose)
     project.network.build_graphs()
     if verbose:
         print("✓ Network built successfully!")

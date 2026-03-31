@@ -6,7 +6,12 @@ import numpy as np
 from shapely.geometry import LineString
 
 from .nodes import snap
-from .config import SPEED_FIELD, DEFAULT_SPEED_KMH
+from .config import (
+    SPEED_FIELD,
+    DEFAULT_SPEED_KMH,
+    CAPACITY_VPHPL_BY_CARTO_CLASS,
+    DEFAULT_CAPACITY_VPHPL,
+)
 
 
 def _adjust_geometry_endpoints(geom, new_start, new_end):
@@ -27,6 +32,18 @@ def _adjust_geometry_endpoints(geom, new_start, new_end):
     coords[0] = new_start
     coords[-1] = new_end
     return LineString(coords)
+
+
+def _capacity_total_vph(road, lanes) -> float:
+    """Total veh/h capacity in the direction of travel: vphpl(CartoClass) * lane count."""
+    carto = str(road.get("CartoClass", "")).strip().lower()
+    vphpl = float(CAPACITY_VPHPL_BY_CARTO_CLASS.get(carto, DEFAULT_CAPACITY_VPHPL))
+    try:
+        n = int(lanes) if lanes is not None and not (isinstance(lanes, float) and np.isnan(lanes)) else 1
+    except (TypeError, ValueError):
+        n = 1
+    n = max(1, n)
+    return vphpl * n
 
 
 def _get_speed_kmh(road):
@@ -85,6 +102,7 @@ def _flow_direction_to_links(road, start_coord, end_coord, nodes, next_link_id,
     link_type = road['CartoClass'].lower()
     name = road.get('StreetName', '')
     lanes = road.get('NumberofLa', 1)
+    capacity_vph = _capacity_total_vph(road, lanes)
     
     def one_link(from_coord, to_coord):
         return {
@@ -95,6 +113,7 @@ def _flow_direction_to_links(road, start_coord, end_coord, nodes, next_link_id,
             'length': length_m,
             'speed_kmh': speed_kmh,
             'travel_time_min': round(travel_time_min, 4),
+            'capacity': capacity_vph,
             'link_type': link_type,
             'name': name,
             'geometry': geom,

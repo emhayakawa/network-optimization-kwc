@@ -327,6 +327,10 @@ def build_bus_network_component(bus_gtfs=None):
     
     # Collect all unique (from_stop, to_stop, route) segments with travel times
     segment_times = {}
+    # Some GTFS feeds contain consecutive stops with identical timestamps (0-minute runtime).
+    # Dropping these segments can disconnect the stop pattern, so we keep them but floor to
+    # a small positive runtime to avoid zero-cost cycles in later routing/assignment.
+    _MIN_SEGMENT_TIME_MIN = 0.1  # 6 seconds
     
     for trip_id, grp in st.groupby("trip_id"):
         grp = grp.sort_values("stop_sequence")
@@ -339,10 +343,16 @@ def build_bus_network_component(bus_gtfs=None):
             s1, s2 = stop_ids[i], stop_ids[i + 1]
             key = (s1, s2, route_id)
             travel_min = arr[i + 1] - dep[i]
-            if not np.isnan(travel_min) and travel_min > 0:
-                if key not in segment_times:
-                    segment_times[key] = []
-                segment_times[key].append(travel_min)
+            if np.isnan(travel_min):
+                continue
+            if travel_min < 0:
+                continue
+            travel_min = float(travel_min)
+            if travel_min == 0:
+                travel_min = _MIN_SEGMENT_TIME_MIN
+            if key not in segment_times:
+                segment_times[key] = []
+            segment_times[key].append(travel_min)
     
     # Create route links using average travel time for each segment
     route_links = []
@@ -839,12 +849,31 @@ def save_network_data(nodes_df, links_df, link_shapes, out_dir, srid=26917, verb
     ]
     gdf_nodes[node_cols + extra].to_csv(node_file, index=False)
     
-    # Links: match links.csv schema (link_id, from_node_id, to_node_id, link_type, route_id, travel_time_min, length_m, mode)
+    # Links: GMNS fields for AequilibraE (directed + length are required for create_from_gmns)
     link_cols = ["link_id", "from_node_id", "to_node_id", "link_type", "route_id", "travel_time_min", "length_m", "mode"]
     link_cols = [c for c in link_cols if c in links_df.columns]
     links_export = links_df[link_cols].copy()
+    links_export["directed"] = 1
+    if "length_m" in links_export.columns:
+        links_export["length"] = pd.to_numeric(links_export["length_m"], errors="coerce").fillna(0.0)
+    else:
+        links_export["length"] = 0.0
+    links_export["geometry_id"] = links_export["link_id"].astype(int)
+    # AequilibraE GMNS equivalency maps link.modes → CSV column ``allowed_uses`` (not "modes").
+    # See parameters network.gmns.link.equivalency.modes → allowed_uses. Values must be mode_name keys
+    # in the project modes table (e.g. "transit" for graph mode "t").
+    links_export["allowed_uses"] = "transit"
+    # AequilibraE always INSERTs lanes_ab/lanes_ba but only ALTERs the links table to add those columns
+    # when the GMNS equivalency column ``lanes`` exists (parameters: link.equivalency.lanes → "lanes").
+    links_export["lanes"] = 1
+    # Optional: align with road GMNS naming (AequilibraE maps free_speed / travel_time if present)
     link_file = os.path.join(out_dir, "link.csv")
-    links_export.to_csv(link_file, index=False)
+    out_cols = (
+        ["link_id", "from_node_id", "to_node_id", "directed", "length", "geometry_id"]
+        + [c for c in link_cols if c not in ("link_id", "from_node_id", "to_node_id")]
+        + ["allowed_uses", "lanes"]
+    )
+    links_export[[c for c in out_cols if c in links_export.columns]].to_csv(link_file, index=False)
     
     # For transfer/multimodal links: use display coords so zero-length links get visible geometry
     node_xy = gdf_nodes.set_index("node_id")[["x_coord", "y_coord"]].to_dict("index")
