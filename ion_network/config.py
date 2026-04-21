@@ -63,7 +63,7 @@ WAITING_TIME_BUS = 7.5    # Average wait for bus (minutes)
 WAITING_TIME_LRT = 5.0    # Average wait for LRT (minutes)
 
 # Value of time (dollars per minute) - same as bus network
-VALUE_OF_TIME = 0.33      # $20/hour
+VALUE_OF_TIME = 0.5      # $30/hour
 
 # =============================================================================
 # Mode Identifiers

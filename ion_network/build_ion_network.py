@@ -1539,8 +1539,8 @@ if __name__ == "__main__":
     bus_nodes = nodes_df[nodes_df["mode"] == MODE_BUS]
     
     if len(lrt_nodes) > 0 and len(bus_nodes) > 0:
-        orig_node = int(1614)
-        dest_node = int(2874)
+        orig_node = int(2869)#1614
+        dest_node = int(2904)#2874
         
         print(f"  Finding path from node {orig_node} to node {dest_node}")
         orig_mode = nodes_df[nodes_df["node_id"] == orig_node]["mode"].iloc[0] if orig_node in nodes_df["node_id"].values else MODE_BUS

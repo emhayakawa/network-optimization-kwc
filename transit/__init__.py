@@ -23,13 +23,27 @@ from .shortest_path import (
     COST_DISTANCE,
     COST_GENERALIZED,
 )
-from zone_to_zone_routing import (
-    node_ids_in_zone,
-    shortest_path_transit_zone_to_zone,
-    shortest_path_ion_zone_to_zone,
-    shortest_path_road_zone_to_zone,
-    shortest_path_zone_to_zone,
+
+# zone_to_zone_routing imports transit.shortest_path; eager re-import here caused a circular
+# import. Lazy attributes keep ``from transit import shortest_path_road_zone_to_zone`` working.
+_Z2Z_EXPORTS = frozenset(
+    {
+        "node_ids_in_zone",
+        "shortest_path_transit_zone_to_zone",
+        "shortest_path_ion_zone_to_zone",
+        "shortest_path_road_zone_to_zone",
+        "shortest_path_zone_to_zone",
+    }
 )
+
+
+def __getattr__(name):
+    if name in _Z2Z_EXPORTS:
+        import zone_to_zone_routing as _z2z
+
+        return getattr(_z2z, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "shortest_path_transit",

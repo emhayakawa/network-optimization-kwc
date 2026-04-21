@@ -72,7 +72,7 @@ DEFAULT_CAPACITY_VPHPL = 600  # fallback when CartoClass is missing or unknown
 # ============================================================================
 # Generalized Cost = (distance_km * COST_PER_KM) + (travel_time_hours * VALUE_OF_TIME)
 COST_PER_KM = 0.50         # $/km - vehicle operating cost (fuel, wear, etc.)
-VALUE_OF_TIME = 40.00      # $/hour - value of travel time
+VALUE_OF_TIME = 30.00      # $/hour - value of travel time
 
 # ============================================================================
 # Spatial Reference

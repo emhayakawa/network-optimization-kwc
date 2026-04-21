@@ -1,0 +1,12 @@
+{
+  "input_file": "/Users/ellyhayakawa/Library/CloudStorage/OneDrive-Personal/URA/zone-to-zone-shortest-path/zone_to_zone_generalized_cost_all_networks_long.csv",
+  "high_transit_quantile": 0.95,
+  "high_transit_threshold": 33.5234,
+  "n_high_transit_od_pairs": 2062,
+  "outputs": [
+    "average_generalized_cost_by_network.csv",
+    "pairwise_mode_comparison_summary.csv",
+    "road_vs_transit_by_distance_bin.csv",
+    "extreme_high_transit_cost_od_pairs.csv"
+  ]
+}

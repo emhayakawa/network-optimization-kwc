@@ -830,8 +830,8 @@ if __name__ == "__main__":
     
     print("\n=== Testing shortest path (Generalized Cost) ===")
     all_node_ids = list(nodes_df['node_id'].values)
-    orig_node = int(1614)
-    dest_node = int(1600)
+    orig_node = int(898) #1614
+    dest_node = int(402)#1600
     
     print(f"  Finding path from node {orig_node} to node {dest_node}")
     print(f"  Cost parameters: FARE=${FARE_CONSTANT:.2f}, VALUE_OF_TIME=${VALUE_OF_TIME:.2f}/min")

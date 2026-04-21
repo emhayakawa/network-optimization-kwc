@@ -22,7 +22,7 @@ STOP_CLUSTER_RADIUS_M = 100.0  # meters
 
 FARE_CONSTANT = 3.50          # flat fare in dollars
 WAITING_TIME_MINUTES = 7.5    # average wait time for bus at origin (minutes)
-VALUE_OF_TIME = 0.33          # dollars per minute ($20/hour)
+VALUE_OF_TIME = 0.5          # dollars per minute ($30/hour)
 
 # Note: Road network uses VALUE_OF_TIME = $25/hour = $0.417/min
 # Transit typically uses same or slightly lower value

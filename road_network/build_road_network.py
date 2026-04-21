@@ -407,8 +407,8 @@ if __name__ == "__main__":
     
     print("\n=== Testing shortest path (NetworkX with generalized cost) ===")
     all_node_ids = list(nodes_gdf['node_id'].values)
-    orig_node = int(1761)#(all_node_ids[0])
-    dest_node = int(2657)#(all_node_ids[min(100, len(all_node_ids) - 1)])
+    orig_node = int(1687)#(all_node_ids[0])
+    dest_node = int(246)#(all_node_ids[min(100, len(all_node_ids) - 1)])
     # orig_node = int(all_node_ids[0])
     # dest_node = int(all_node_ids[min(100, len(all_node_ids) - 1)])
     

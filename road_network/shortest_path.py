@@ -64,6 +64,103 @@ def build_networkx_graph(edges_gdf, weight_field='generalized_cost'):
     return G
 
 
+def _path_nodes_to_link_ids(G, path_nodes):
+    """Map a node sequence to link_id values using edges on ``G``."""
+    path_links = []
+    for i in range(len(path_nodes) - 1):
+        edge_data = G.get_edge_data(path_nodes[i], path_nodes[i + 1])
+        if edge_data:
+            path_links.append(edge_data['link_id'])
+    return path_links
+
+
+def compute_shortest_path_networkx_from_graph(G, orig_node, dest_node, verbose=False):
+    """
+    Shortest path on a pre-built DiGraph using the ``weight`` edge attribute.
+
+    Returns the same dict shape as :func:`compute_shortest_path_networkx`.
+    """
+    try:
+        path_nodes = nx.dijkstra_path(G, orig_node, dest_node, weight='weight')
+        total_cost = nx.dijkstra_path_length(G, orig_node, dest_node, weight='weight')
+        path_links = _path_nodes_to_link_ids(G, path_nodes)
+        if verbose:
+            print(f"  Path found! Total cost: {total_cost:.4f}")
+        return {
+            "path_nodes": path_nodes,
+            "path_links": path_links,
+            "total_cost": total_cost,
+            "found": True,
+        }
+    except (nx.NetworkXNoPath, nx.NodeNotFound):
+        if verbose:
+            print("  No path found!")
+        return {
+            "path_nodes": None,
+            "path_links": None,
+            "total_cost": None,
+            "found": False,
+        }
+
+
+def shortest_path_zone_sets_multi_source(G, orig_nodes, dest_nodes):
+    """
+    Best path between two *sets* of nodes (e.g. all nodes in origin TAZ vs destination TAZ).
+
+    Uses one multi-source Dijkstra from all ``orig_nodes`` (distance 0 at each source), then
+    picks the destination node with minimum cost and recovers one shortest path.
+
+    Parameters:
+        G: nx.DiGraph from :func:`build_networkx_graph`
+        orig_nodes: non-empty list of origin node IDs
+        dest_nodes: non-empty list of destination node IDs
+
+    Returns:
+        Same dict keys as :func:`compute_shortest_path_networkx`, plus ``orig_node_id`` and
+        ``dest_node_id`` when ``found`` is True.
+    """
+    empty = {
+        "path_nodes": None,
+        "path_links": None,
+        "total_cost": None,
+        "found": False,
+        "orig_node_id": None,
+        "dest_node_id": None,
+    }
+    if not orig_nodes or not dest_nodes:
+        return empty
+
+    inf = float("inf")
+    dists = nx.multi_source_dijkstra_path_length(G, orig_nodes, weight="weight")
+    best_dest = None
+    best_cost = inf
+    for d in dest_nodes:
+        c = dists.get(d, inf)
+        if c < best_cost:
+            best_cost = c
+            best_dest = d
+
+    if best_dest is None or best_cost == inf:
+        return empty
+
+    try:
+        total_cost, path_nodes = nx.multi_source_dijkstra(
+            G, orig_nodes, target=best_dest, weight="weight"
+        )
+    except (nx.NetworkXNoPath, nx.NodeNotFound):
+        return empty
+
+    path_links = _path_nodes_to_link_ids(G, path_nodes)
+    return {
+        "path_nodes": path_nodes,
+        "path_links": path_links,
+        "total_cost": float(total_cost),
+        "found": True,
+        "orig_node_id": int(path_nodes[0]),
+        "dest_node_id": int(path_nodes[-1]),
+    }
+
+
 def compute_shortest_path_networkx(edges_gdf, orig_node, dest_node, 
                                     weight_field='generalized_cost', verbose=True):
     """
@@ -84,41 +181,7 @@ def compute_shortest_path_networkx(edges_gdf, orig_node, dest_node,
         print(f"  Cost field: {weight_field}")
     
     G = build_networkx_graph(edges_gdf, weight_field)
-    
-    try:
-        # Get shortest path
-        path_nodes = nx.dijkstra_path(G, orig_node, dest_node, weight='weight')
-        total_cost = nx.dijkstra_path_length(G, orig_node, dest_node, weight='weight')
-        
-        # Extract link IDs along the path
-        path_links = []
-        for i in range(len(path_nodes) - 1):
-            edge_data = G.get_edge_data(path_nodes[i], path_nodes[i + 1])
-            if edge_data:
-                path_links.append(edge_data['link_id'])
-        
-        if verbose:
-            print(f"  Path found!")
-            print(f"  Total {weight_field}: {total_cost:.4f}")
-            print(f"  Nodes: {len(path_nodes)}, Links: {len(path_links)}")
-            print(f"  Node sequence (origin -> destination): {path_nodes}")
-        
-        return {
-            "path_nodes": path_nodes,
-            "path_links": path_links,
-            "total_cost": total_cost,
-            "found": True,
-        }
-    
-    except nx.NetworkXNoPath:
-        if verbose:
-            print("  No path found!")
-        return {
-            "path_nodes": None,
-            "path_links": None,
-            "total_cost": None,
-            "found": False,
-        }
+    return compute_shortest_path_networkx_from_graph(G, orig_node, dest_node, verbose=verbose)
 
 
 def compute_shortest_path(project, orig_node, dest_node, cost_field="length", verbose=True):

@@ -1,5 +1,5 @@
 """
-Export TAP assignment results to GeoPackage for ArcGIS / QGIS.
+Export TAP assignment results to GeoPackage for ArcGIS / QGIS (road network).
 
 * **assignment_links** — **all** network link geometries **left-joined** to ``assig.results()`` (``demand_tot``,
   PCE_tot, congested times, etc.). Unused links still appear with zero / null assignment fields—filter
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable, List, Literal, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -23,13 +23,6 @@ if TYPE_CHECKING:
     from aequilibrae.paths import Graph
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-
-LayerName = Literal["road", "ion"]
-
-
-def _ion_data_paths() -> Tuple[Path, Path, Path]:
-    base = _REPO_ROOT / "ion_network" / "data"
-    return base / "node.csv", base / "link.csv", base / "geometry.csv"
 
 
 def _road_gmns_paths() -> Tuple[Path, Path, Path]:
@@ -44,7 +37,7 @@ def _links_gdf_from_csv(
     *,
     crs_proj: str = "EPSG:26917",
 ) -> "geopandas.GeoDataFrame":
-    """Build a links GeoDataFrame from saved GMNS-style CSVs (same logic as ion export_to_arcgis_from_data)."""
+    """Build a links GeoDataFrame from saved GMNS-style CSVs."""
     from shapely import wkt
     import geopandas as gpd
 
@@ -66,41 +59,35 @@ def _links_gdf_from_csv(
     return gdf.to_crs("EPSG:4326")
 
 
-def load_links_geodataframe(layer: LayerName):
+def load_links_geodataframe():
     """
-    Load link geometries for ``layer``: prefer ``arcgis_export/*_network.gpkg`` layer ``links``,
-    else build from saved ``data`` CSVs.
+    Load link geometries: prefer ``road_network/arcgis_export/road_network.gpkg`` layer ``links``,
+    else build from saved ``data/gmns`` CSVs.
     """
     import geopandas as gpd
 
-    gpkg = _REPO_ROOT / f"{layer}_network" / "arcgis_export" / f"{layer}_network.gpkg"
+    gpkg = _REPO_ROOT / "road_network" / "arcgis_export" / "road_network.gpkg"
     if gpkg.is_file():
         return gpd.read_file(gpkg, layer="links")
 
-    if layer == "ion":
-        n, l, g = _ion_data_paths()
-    else:
-        n, l, g = _road_gmns_paths()
+    n, l, g = _road_gmns_paths()
     for p in (n, l, g):
         if not p.is_file():
             raise FileNotFoundError(
-                f"Missing {p}. Build the {layer} network (ArcGIS export or GMNS data folder) first."
+                f"Missing {p}. Build the road network (ArcGIS export or GMNS data folder) first."
             )
     return _links_gdf_from_csv(n, l, g)
 
 
-def load_nodes_geodataframe(layer: LayerName):
+def load_nodes_geodataframe():
     """Point layer for path node export (optional)."""
     import geopandas as gpd
 
-    gpkg = _REPO_ROOT / f"{layer}_network" / "arcgis_export" / f"{layer}_network.gpkg"
+    gpkg = _REPO_ROOT / "road_network" / "arcgis_export" / "road_network.gpkg"
     if gpkg.is_file():
         return gpd.read_file(gpkg, layer="nodes")
 
-    if layer == "ion":
-        node_csv = _ion_data_paths()[0]
-    else:
-        node_csv = _road_gmns_paths()[0]
+    node_csv = _road_gmns_paths()[0]
     if not node_csv.is_file():
         raise FileNotFoundError(f"Missing {node_csv}")
     nodes_df = pd.read_csv(node_csv)
@@ -239,7 +226,6 @@ def export_paths_to_gpkg(
 
 
 def export_assignment_gpkg(
-    layer: LayerName,
     results_df: pd.DataFrame,
     out_path: Path,
     *,
@@ -260,7 +246,7 @@ def export_assignment_gpkg(
     """
     out_path = Path(out_path)
     os.makedirs(out_path.parent, exist_ok=True)
-    links_gdf = load_links_geodataframe(layer)
+    links_gdf = load_links_geodataframe()
     merged = merge_assignment_results_to_links(links_gdf, results_df)
     if assignment_links_flow_only:
         if "demand_tot" not in merged.columns:
@@ -284,7 +270,7 @@ def export_assignment_gpkg(
     pairs = list(path_od_pairs) if path_od_pairs else []
     if pairs and graph is not None and time_field:
         try:
-            nodes_gdf = load_nodes_geodataframe(layer)
+            nodes_gdf = load_nodes_geodataframe()
         except Exception:
             nodes_gdf = None
         try:

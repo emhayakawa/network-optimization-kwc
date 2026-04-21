@@ -26,6 +26,48 @@ DEFAULT_WAITING_TIME = 7.5    # minutes
 DEFAULT_VALUE_OF_TIME = 0.33  # dollars per minute ($20/hour)
 
 
+def build_transit_runtime_cache(nodes_df, links_df, cost=COST_GENERALIZED, value_of_time=None):
+    """
+    Build reusable transit structures for repeated OD shortest-path calls.
+
+    The cache stores:
+    - ``link_lookup`` (MultiIndex by from/to node),
+    - cluster mappings for fast destination-cluster lookup,
+    - adjacency lists memoized per destination cluster key.
+
+    Notes:
+    - Adjacency remains destination-dependent because transfer links into the
+      destination cluster are set to zero cost/time in current logic.
+    - For networks without ``cluster_id`` column, cache keys are per destination node.
+    """
+    if value_of_time is None:
+        value_of_time = DEFAULT_VALUE_OF_TIME
+
+    node_to_cluster = {}
+    cluster_to_nodes = {}
+    has_cluster = "cluster_id" in nodes_df.columns
+    if has_cluster:
+        tmp = nodes_df[["node_id", "cluster_id"]].copy()
+        tmp["node_id"] = pd.to_numeric(tmp["node_id"], errors="coerce")
+        tmp = tmp.dropna(subset=["node_id"])
+        tmp["node_id"] = tmp["node_id"].astype(int)
+        for _, row in tmp.iterrows():
+            nid = int(row["node_id"])
+            cid = row["cluster_id"]
+            node_to_cluster[nid] = cid
+            cluster_to_nodes.setdefault(cid, set()).add(nid)
+
+    return {
+        "cost": cost,
+        "value_of_time": float(value_of_time),
+        "link_lookup": links_df.set_index(["from_node_id", "to_node_id"]).sort_index(),
+        "has_cluster": has_cluster,
+        "node_to_cluster": node_to_cluster,
+        "cluster_to_nodes": cluster_to_nodes,
+        "adj_by_dest_key": {},
+    }
+
+
 def _get_dest_cluster_nodes(nodes_df, dest_node_id):
     """Return set of node_ids in the same cluster as dest_node_id. Used to waive transfer cost when arriving at destination cluster."""
     dest_node_id = int(dest_node_id)
@@ -37,6 +79,19 @@ def _get_dest_cluster_nodes(nodes_df, dest_node_id):
     dest_cluster = dest_row["cluster_id"].iloc[0]
     same_cluster = nodes_df[nodes_df["cluster_id"] == dest_cluster]["node_id"].astype(int).tolist()
     return set(same_cluster)
+
+
+def _dest_cluster_info(nodes_df, dest_node_id, transit_cache=None):
+    """Return ``(dest_key, dest_cluster_nodes)`` for adjacency memoization."""
+    dest_node_id = int(dest_node_id)
+    if transit_cache is not None:
+        if transit_cache.get("has_cluster"):
+            cid = transit_cache["node_to_cluster"].get(dest_node_id)
+            if cid is not None:
+                return ("cluster", cid), set(transit_cache["cluster_to_nodes"].get(cid, {dest_node_id}))
+        return ("node", dest_node_id), {dest_node_id}
+
+    return ("node", dest_node_id), _get_dest_cluster_nodes(nodes_df, dest_node_id)
 
 
 def _build_adjacency(links_df, cost_field, dest_cluster_nodes=None):
@@ -88,6 +143,7 @@ def shortest_path_transit(
     fare=None,
     waiting_time_min=None,
     value_of_time=None,
+    transit_cache=None,
     verbose=True,
 ):
     """
@@ -118,15 +174,27 @@ def shortest_path_transit(
 
     orig_node_id = int(orig_node_id)
     dest_node_id = int(dest_node_id)
-    dest_cluster_nodes = _get_dest_cluster_nodes(nodes_df, dest_node_id)
+    dest_key, dest_cluster_nodes = _dest_cluster_info(nodes_df, dest_node_id, transit_cache=transit_cache)
 
-    if cost == COST_GENERALIZED:
-        adj = _build_adjacency_generalized(links_df, value_of_time, dest_cluster_nodes)
-        use_generalized = True
+    adj = None
+    if transit_cache is not None:
+        cache_cost = transit_cache.get("cost")
+        cache_vot = float(transit_cache.get("value_of_time", value_of_time))
+        if cache_cost == cost and (cost != COST_GENERALIZED or abs(cache_vot - float(value_of_time)) < 1e-12):
+            adj = transit_cache["adj_by_dest_key"].get(dest_key)
+
+    if adj is None:
+        if cost == COST_GENERALIZED:
+            adj = _build_adjacency_generalized(links_df, value_of_time, dest_cluster_nodes)
+            use_generalized = True
+        else:
+            cost_field = "travel_time_min" if cost == COST_TIME else "length_m"
+            adj = _build_adjacency(links_df, cost_field, dest_cluster_nodes)
+            use_generalized = False
+        if transit_cache is not None:
+            transit_cache["adj_by_dest_key"][dest_key] = adj
     else:
-        cost_field = "travel_time_min" if cost == COST_TIME else "length_m"
-        adj = _build_adjacency(links_df, cost_field, dest_cluster_nodes)
-        use_generalized = False
+        use_generalized = cost == COST_GENERALIZED
 
     dist = {orig_node_id: 0.0}
     pred = {orig_node_id: None}
@@ -175,7 +243,11 @@ def shortest_path_transit(
     path_nodes.reverse()
 
     path_links = [(path_nodes[i], path_nodes[i + 1]) for i in range(len(path_nodes) - 1)]
-    link_lookup = links_df.set_index(["from_node_id", "to_node_id"])
+    link_lookup = (
+        transit_cache["link_lookup"]
+        if transit_cache is not None and "link_lookup" in transit_cache
+        else links_df.set_index(["from_node_id", "to_node_id"]).sort_index()
+    )
 
     total_time_min = 0.0
     total_length_m = 0.0
@@ -284,7 +356,7 @@ def compute_path_details(links_df, path_links, nodes_df=None):
     dest_node = path_links[-1][1]  # path ends at destination
     dest_cluster_nodes = _get_dest_cluster_nodes(nodes_df, dest_node) if nodes_df is not None else set()
 
-    link_lookup = links_df.set_index(["from_node_id", "to_node_id"])
+    link_lookup = links_df.set_index(["from_node_id", "to_node_id"]).sort_index()
     total_length_m = 0.0
     total_travel_time_min = 0.0
     num_transfers = 0
@@ -424,7 +496,7 @@ def export_shortest_path_to_arcgis(nodes_df, links_df, path_nodes, path_links, o
     )
 
     node_coord = nodes_df.set_index("node_id")[["stop_lat", "stop_lon"]].to_dict("index")
-    link_lookup = links_df.set_index(["from_node_id", "to_node_id"])
+    link_lookup = links_df.set_index(["from_node_id", "to_node_id"]).sort_index()
 
     path_links_data = []
     n_with_shapes = 0

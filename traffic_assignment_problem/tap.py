@@ -1,7 +1,7 @@
 """
-Static traffic assignment (TAP) for the eight-TAZ subset on **road** or **ION** alone.
+Static traffic assignment (TAP) for the eight-TAZ subset on the **road** network.
 
-Uses ``multi_layer_assignment`` to pick centroid nodes per TAZ, set centroids on the
+Uses :mod:`road_assignment` to pick centroid nodes per TAZ, set centroids on the
 AequilibraE project, load trips from ``od_matrix.csv`` (TAZ→TAZ long format), and run
 ``TrafficAssignment``.
 
@@ -17,26 +17,23 @@ the AequilibraE project (from GMNS). Rebuild the road network + project after ed
 
 Run from the **URA repo root**::
 
-    python traffic_assignment_problem/tap.py --layer road
-    python traffic_assignment_problem/tap.py --layer ion --mode=t
+    python traffic_assignment_problem/tap.py
 
-Default graph mode is **c** (car) for road and **t** (transit) for ION — use ``--mode`` to override.
+Default graph mode is **c** (car) — use ``--mode`` to override.
 
-After each run, results are written to ``traffic_assignment_problem/arcgis_export/tap_assignment_<layer>.gpkg``
-(e.g. ``tap_assignment_ion.gpkg``) unless you pass ``--no-export-gpkg``. Override the path with ``--export-gpkg PATH``.
+After each run, results are written to ``traffic_assignment_problem/arcgis_export/tap_assignment_road.gpkg``
+unless you pass ``--no-export-gpkg``. Override the path with ``--export-gpkg PATH``.
 The default ``assignment_links`` layer includes **all** links (zeros on unused links). Use
 ``--export-gpkg-flow-only`` to write only links with ``demand_tot > 0``, or filter in ArcGIS
 (``demand_tot > 0``).
 
-To feed :mod:`mode_split` congested skims, pass ``--export-results-csv`` (optional path) to write
-``link_id`` and ``Congested_Time_Max`` for use with ``--road-results`` / ``--ion-results``.
 Optional sample shortest-path layers::
 
-    python traffic_assignment_problem/tap.py --layer road --export-path 811:836 --export-path 785:797
+    python traffic_assignment_problem/tap.py --export-path 811:836 --export-path 785:797
 
-List valid ``--mode`` values for a project::
+List valid ``--mode`` values for the road project::
 
-    python traffic_assignment_problem/tap.py --layer ion --list-modes
+    python traffic_assignment_problem/tap.py --list-modes
 """
 
 from __future__ import annotations
@@ -44,7 +41,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import List, Literal, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -54,10 +51,9 @@ _TAP_DIR = Path(__file__).resolve().parent
 if str(_TAP_DIR) not in sys.path:
     sys.path.insert(0, str(_TAP_DIR))
 
-from multi_layer_assignment import (
-    DEFAULT_ION_NODE_CSV,
+from road_assignment import (
     DEFAULT_ROAD_NODE_CSV,
-    MultiLayerPaths,
+    RoadNetworkPaths,
     TAZ_SUBSET_EIGHT,
     build_traffic_assignment,
     create_memory_od_matrix,
@@ -69,8 +65,6 @@ from multi_layer_assignment import (
 )
 
 from assignment_export import export_assignment_gpkg
-
-LayerName = Literal["road", "ion"]
 
 # Long-format OD: TAZ → TAZ trips. Columns: zone_id_from, zone_id_to, demand
 OD_MATRIX_CSV = _TAP_DIR / "od_matrix.csv"
@@ -137,21 +131,6 @@ def load_od_matrix_into_demand(
     )
 
 
-def open_project_for_layer(layer: LayerName, paths: Optional[MultiLayerPaths] = None):
-    paths = paths or MultiLayerPaths()
-    if layer == "road":
-        return open_layer_project(paths.road_project)
-    if layer == "ion":
-        return open_layer_project(paths.ion_project)
-    raise ValueError("layer must be 'road' or 'ion'")
-
-
-def node_csv_for_layer(layer: LayerName) -> Path:
-    if layer == "road":
-        return DEFAULT_ROAD_NODE_CSV
-    return DEFAULT_ION_NODE_CSV
-
-
 def _results_dataframe_with_link_id_column(results: pd.DataFrame) -> pd.DataFrame:
     """
     AequilibraE ``assig.results()`` often stores ``link_id`` on the **index**, not as a column.
@@ -176,20 +155,20 @@ def _results_dataframe_with_link_id_column(results: pd.DataFrame) -> pd.DataFram
     )
 
 
-def export_assignment_results_csv_for_mode_split(results: pd.DataFrame, path: Path) -> None:
-    """Write ``link_id`` + ``Congested_Time_Max`` for :mod:`mode_split` ``--road-results`` / ``--ion-results``."""
+def export_assignment_link_times_csv(results: pd.DataFrame, path: Path) -> None:
+    """Write ``link_id`` and ``Congested_Time_Max`` for downstream analysis."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     res = _results_dataframe_with_link_id_column(results)
     if "Congested_Time_Max" not in res.columns:
         raise ValueError(
             f"Assignment results missing Congested_Time_Max (have {list(res.columns)}); "
-            "cannot export mode_split CSV."
+            "cannot export link times CSV."
         )
     out = res[["link_id", "Congested_Time_Max"]].copy()
     out["link_id"] = out["link_id"].astype(int)
     out.to_csv(path, index=False)
-    print(f"\nLink results CSV written (for mode_split): {path.resolve()}")
+    print(f"\nLink results CSV written: {path.resolve()}")
 
 
 def list_graph_modes(project) -> None:
@@ -200,13 +179,8 @@ def list_graph_modes(project) -> None:
     print("Available modes:", ", ".join(repr(m) for m in sorted(graphs.keys())))
 
 
-def _default_mode_for_layer(layer: LayerName) -> str:
-    return "t" if layer == "ion" else "c"
-
-
 def run_tap(
-    layer: LayerName,
-    mode: Optional[str] = None,
+    mode: str = "c",
     *,
     od_matrix_path: Optional[Path] = None,
     max_iter: int = 50,
@@ -223,20 +197,15 @@ def run_tap(
     """
     Configure centroids for :data:`TAZ_SUBSET_EIGHT`, load trips from ``od_matrix.csv``,
     and run TAP on ``mode``.
-
-    Demand is read from :data:`OD_MATRIX_CSV` (or ``od_matrix_path``): TAZ columns are
-    mapped to centroid node IDs; ``fill_od_from_long_table`` fills the matrix in
-    database (centroid) index order.
     """
-    mode = mode if mode is not None else _default_mode_for_layer(layer)
-    paths = MultiLayerPaths()
-    project = open_project_for_layer(layer, paths)
+    paths = RoadNetworkPaths()
+    project = open_layer_project(paths.road_project)
 
-    csv = Path(node_csv) if node_csv is not None else node_csv_for_layer(layer)
+    csv = Path(node_csv) if node_csv is not None else DEFAULT_ROAD_NODE_CSV
     centroid_pick, summary = pick_centroid_node_ids_per_zone_from_node_csv(
         csv, TAZ_SUBSET_EIGHT
     )
-    print(f"Layer={layer!r}, TAZ subset (order): {TAZ_SUBSET_EIGHT}")
+    print(f"TAZ subset (order): {TAZ_SUBSET_EIGHT}")
     print("Representative node per TAZ (from GMNS node.csv):")
     print(summary.to_string(index=False))
 
@@ -266,8 +235,8 @@ def run_tap(
             f"{dead}. Check graph mode {mode!r} on incident links (link ``modes`` in GMNS) and connectivity."
         )
 
-    algo = algorithm if algorithm is not None else ("bfw" if layer == "road" else "msa")
-    cls_name = class_name if class_name is not None else f"{layer}_{mode}"
+    algo = algorithm if algorithm is not None else "bfw"
+    cls_name = class_name if class_name is not None else f"road_{mode}"
 
     assig = build_traffic_assignment(
         project,
@@ -315,7 +284,7 @@ def run_tap(
 
     if export_results_csv is not None:
         try:
-            export_assignment_results_csv_for_mode_split(results, Path(export_results_csv))
+            export_assignment_link_times_csv(results, Path(export_results_csv))
         except Exception as e:
             print(f"\nWarning: --export-results-csv failed: {e}")
 
@@ -325,7 +294,6 @@ def run_tap(
         try:
             tf = assig.time_field
             export_assignment_gpkg(
-                layer,
                 results,
                 out,
                 graph=graph,
@@ -349,22 +317,16 @@ def run_tap(
 
 
 def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="TAP on road or ION for eight TAZs.")
-    p.add_argument(
-        "--layer",
-        choices=("road", "ion"),
-        default="road",
-        help="Network project to open.",
-    )
+    p = argparse.ArgumentParser(description="Road network TAP for eight TAZs.")
     p.add_argument(
         "--mode",
-        default=None,
-        help="AequilibraE graph mode (default: c for road, t for ION).",
+        default="c",
+        help="AequilibraE graph mode (default: c for car).",
     )
     p.add_argument(
         "--list-modes",
         action="store_true",
-        help="Print graph modes for --layer and exit.",
+        help="Print graph modes for the road project and exit.",
     )
     p.add_argument(
         "--od-matrix",
@@ -383,12 +345,12 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         "--node-csv",
         type=Path,
         default=None,
-        help="Optional GMNS node.csv with zone_id (defaults by --layer).",
+        help="Optional GMNS node.csv with zone_id (default: road_network/data/gmns/node.csv).",
     )
     p.add_argument(
         "--class-name",
         default=None,
-        help="TrafficClass name (default: {layer}_{mode}).",
+        help="TrafficClass name (default: road_<mode>).",
     )
     p.add_argument(
         "--block-centroid-flows",
@@ -399,7 +361,7 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument(
         "--no-export-gpkg",
         action="store_true",
-        help="Skip writing traffic_assignment_problem/arcgis_export/tap_assignment_<layer>.gpkg after assignment.",
+        help="Skip writing traffic_assignment_problem/arcgis_export/tap_assignment_road.gpkg after assignment.",
     )
     p.add_argument(
         "--export-gpkg",
@@ -407,7 +369,7 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         const="__default__",
         default=None,
         metavar="PATH",
-        help="GeoPackage output path (default without this flag: tap_assignment_<layer>.gpkg under arcgis_export/). "
+        help="GeoPackage output path (default without this flag: tap_assignment_road.gpkg under arcgis_export/). "
         "Pass this flag alone to force that same default path explicitly.",
     )
     p.add_argument(
@@ -429,8 +391,8 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         default=None,
         metavar="PATH",
         help=(
-            "After assignment, write link_id and Congested_Time_Max to CSV for mode_split "
-            "(--road-results / --ion-results). Default path: tap_assignment_<layer>_link_results.csv next to tap.py."
+            "After assignment, write link_id and Congested_Time_Max to CSV. "
+            "Default path: tap_assignment_road_link_results.csv next to tap.py."
         ),
     )
     return p.parse_args(argv)
@@ -447,10 +409,10 @@ def _parse_od_pair(s: str) -> Tuple[int, int]:
 
 def main(argv: Optional[list[str]] = None) -> None:
     args = _parse_args(argv)
-    layer: LayerName = args.layer
 
     if args.list_modes:
-        project = open_project_for_layer(layer)
+        paths = RoadNetworkPaths()
+        project = open_layer_project(paths.road_project)
         try:
             list_graph_modes(project)
         finally:
@@ -460,7 +422,7 @@ def main(argv: Optional[list[str]] = None) -> None:
                 pass
         return
 
-    default_gpkg = _TAP_DIR / "arcgis_export" / f"tap_assignment_{layer}.gpkg"
+    default_gpkg = _TAP_DIR / "arcgis_export" / "tap_assignment_road.gpkg"
     export_gpkg: Optional[Path] = None
     if args.no_export_gpkg:
         export_gpkg = None
@@ -478,13 +440,12 @@ def main(argv: Optional[list[str]] = None) -> None:
     export_results_csv: Optional[Path] = None
     if args.export_results_csv is not None:
         export_results_csv = (
-            _TAP_DIR / f"tap_assignment_{layer}_link_results.csv"
+            _TAP_DIR / "tap_assignment_road_link_results.csv"
             if args.export_results_csv == "__default__"
             else Path(args.export_results_csv)
         )
 
     run_tap(
-        layer,
         args.mode,
         od_matrix_path=args.od_matrix,
         max_iter=args.max_iter,
